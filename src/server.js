@@ -8,13 +8,6 @@ import wordRoutes     from './routes/words.js';
 import progressRoutes from './routes/progress.js';
 import streakRoutes   from './routes/streaks.js';
 
-// CORRECT
-import authRoutes     from './routes/auth.js';
-import lessonRoutes   from './routes/lessons.js';
-import wordRoutes     from './routes/words.js';
-import progressRoutes from './routes/progress.js';
-import streakRoutes   from './routes/streaks.js';
-
 const fastify = Fastify({ logger: true });
 
 // ── CORS ──────────────────────────────────────────────────
