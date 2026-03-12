@@ -17,10 +17,10 @@ export default async function authRoutes(fastify) {
     const { data: profile, error: userError } = await supabase
       .from('users')
       .insert({
-        supabase_uid: authData.user.id,
+        supabase_uid:   authData.user.id,
         email,
-        display_name: displayName,
-        native_lang: nativeLang,
+        display_name:   displayName,
+        native_lang:    nativeLang,
         learning_langs: learningLangs
       })
       .select()
@@ -34,9 +34,10 @@ export default async function authRoutes(fastify) {
 
     if (streakError) return reply.code(400).send({ error: streakError.message });
 
+    // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
     return reply.code(201).send({
-      jwt: authData.session?.access_token || null,
-      user: profile
+      token: authData.session?.access_token || null,
+      user:  profile
     });
   });
 
@@ -59,27 +60,21 @@ export default async function authRoutes(fastify) {
 
     if (profileError) return reply.code(400).send({ error: profileError.message });
 
-    return { jwt: authData.session?.access_token, user: profile };
+    // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
+    return { token: authData.session?.access_token, user: profile };
   });
 
   // ── POST /forgot-password ──────────────────────────────
-  // Triggers Supabase's built-in password reset email.
-  // Always returns 200 to prevent email enumeration attacks.
   fastify.post('/forgot-password', async (request, reply) => {
     const { email } = request.body;
 
-    if (!email) {
-      return reply.code(400).send({ error: 'Email is required' });
-    }
+    if (!email) return reply.code(400).send({ error: 'Email is required' });
 
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: 'bhashabridge://reset-password'
     });
 
-    // Log the error internally but don't expose whether the email exists
-    if (error) {
-      fastify.log.warn(`Password reset for ${email}: ${error.message}`);
-    }
+    if (error) fastify.log.warn(`Password reset for ${email}: ${error.message}`);
 
     return reply.code(200).send({
       message: 'If an account exists with this email, a reset link has been sent.'
@@ -103,7 +98,7 @@ export default async function authRoutes(fastify) {
     const { displayName, dailyGoalMin, fcmToken } = request.body;
 
     const updateData = {};
-    if (displayName  !== undefined) updateData.display_name  = displayName;
+    if (displayName  !== undefined) updateData.display_name   = displayName;
     if (dailyGoalMin !== undefined) updateData.daily_goal_min = dailyGoalMin;
     if (fcmToken     !== undefined) updateData.fcm_token      = fcmToken;
 
