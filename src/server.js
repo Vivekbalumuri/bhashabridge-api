@@ -1,12 +1,19 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
-import { supabase } from './src/db.js';
-import authRoutes from './src/routes/auth.js';
-import lessonRoutes from './src/routes/lessons.js';
-import wordRoutes from './src/routes/words.js';
-import progressRoutes from './src/routes/progress.js';
-import streakRoutes from './src/routes/streaks.js';
+import { supabase } from './db.js';
+import authRoutes     from './routes/auth.js';
+import lessonRoutes   from './routes/lessons.js';
+import wordRoutes     from './routes/words.js';
+import progressRoutes from './routes/progress.js';
+import streakRoutes   from './routes/streaks.js';
+
+// CORRECT
+import authRoutes     from './routes/auth.js';
+import lessonRoutes   from './routes/lessons.js';
+import wordRoutes     from './routes/words.js';
+import progressRoutes from './routes/progress.js';
+import streakRoutes   from './routes/streaks.js';
 
 const fastify = Fastify({ logger: true });
 
