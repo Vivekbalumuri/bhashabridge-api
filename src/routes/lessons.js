@@ -107,19 +107,21 @@ export default async function lessonsRoutes(fastify) {
       return {
         index,
         word_id: word.id,
-        // FRONT — the word being learned (toLang)
+        // FRONT — user's known language (shown first to trigger memory recall)
         front: {
-          text:           word[to.text]    || '',
-          translit:       to.translit      ? (word[to.translit] || null) : null,
-          lang:           langName[toLang],
-          audio_text:     word[to.text]    || '',   // feed directly to TTS
-          audio_lang_code: to.tts_code,             // "te" / "ta" / "en"
+          text:            word[from.text]  || '',
+          translit:        from.translit    ? (word[from.translit] || null) : null,
+          lang:            langName[fromLang],
+          audio_text:      word[from.text]  || '',
+          audio_lang_code: from.tts_code,
         },
-        // BACK — user's base language (what they already know)
+        // BACK — the language being learned (the answer to reveal)
         back: {
-          text:     word[from.text]   || '',
-          translit: from.translit     ? (word[from.translit] || null) : null,
-          lang:     langName[fromLang],
+          text:            word[to.text]    || '',
+          translit:        to.translit      ? (word[to.translit] || null) : null,
+          lang:            langName[toLang],
+          audio_text:      word[to.text]    || '',
+          audio_lang_code: to.tts_code,
         },
         // ALSO — third language (always shown as bonus)
         also: {
