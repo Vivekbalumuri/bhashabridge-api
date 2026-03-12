@@ -6,7 +6,7 @@ import authRoutes     from './routes/auth.js';
 import lessonRoutes   from './routes/lessons.js';
 import wordRoutes     from './routes/words.js';
 import progressRoutes from './routes/progress.js';
-import streakRoutes   from './routes/streaks.js';
+import streakRoutes   from './routes/streak.js';
 
 const fastify = Fastify({ logger: true });
 
