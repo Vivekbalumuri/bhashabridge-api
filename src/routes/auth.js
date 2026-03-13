@@ -28,17 +28,34 @@ export default async function authRoutes(fastify) {
 
     if (userError) return reply.code(400).send({ error: userError.message });
 
+    // FIX #3: was using insert() which fails silently if row already exists
+    // (e.g. user re-registers after deleting account, or race condition).
+    // upsert() ensures streak row always exists after register — no silent failures.
     const { error: streakError } = await supabase
       .from('streaks')
-      .insert({ user_id: profile.id });
+      .upsert(
+        {
+          user_id:            profile.id,
+          current_streak:     0,
+          longest_streak:     0,
+          total_xp:           0,
+          level:              1,
+          last_activity_date: null,
+        },
+        { onConflict: 'user_id' }
+      );
 
-    if (streakError) return reply.code(400).send({ error: streakError.message });
+    // FIX #3: was returning 400 if streak insert failed, blocking registration.
+    // Streak row failure should never block a user from registering —
+    // streak.js GET / will auto-create the row on first fetch if missing.
+    if (streakError) {
+      fastify.log.warn(`Streak row creation failed for user ${profile.id}: ${streakError.message}`);
+    }
 
-    // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
     return reply.code(201).send({
-      token: authData.session?.access_token || null,
+      token:         authData.session?.access_token  || null,
       refresh_token: authData.session?.refresh_token || null,
-      user:  profile
+      user:          profile
     });
   });
 
@@ -61,8 +78,35 @@ export default async function authRoutes(fastify) {
 
     if (profileError) return reply.code(400).send({ error: profileError.message });
 
-    // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
-    return { token: authData.session?.access_token, refresh_token: authData.session?.refresh_token, user: profile };
+    // Ensure streak row exists on login too — covers users who registered
+    // before this fix was deployed
+    const { data: existingStreak } = await supabase
+      .from('streaks')
+      .select('user_id')
+      .eq('user_id', profile.id)
+      .single();
+
+    if (!existingStreak) {
+      await supabase
+        .from('streaks')
+        .upsert(
+          {
+            user_id:            profile.id,
+            current_streak:     0,
+            longest_streak:     0,
+            total_xp:           0,
+            level:              1,
+            last_activity_date: null,
+          },
+          { onConflict: 'user_id' }
+        );
+    }
+
+    return {
+      token:         authData.session?.access_token,
+      refresh_token: authData.session?.refresh_token,
+      user:          profile
+    };
   });
 
   // ── POST /forgot-password ──────────────────────────────
@@ -139,7 +183,7 @@ export default async function authRoutes(fastify) {
       const { data, error } = await supabase.auth.refreshSession({ refresh_token });
       if (error || !data.session) return reply.code(401).send({ error: 'Invalid or expired refresh token' });
       return {
-        token: data.session.access_token,
+        token:         data.session.access_token,
         refresh_token: data.session.refresh_token,
       };
     } catch (err) {
