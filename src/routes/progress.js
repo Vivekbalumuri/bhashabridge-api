@@ -23,22 +23,42 @@ export default async function progressRoutes(fastify) {
     if (direction) progressQuery = progressQuery.eq('direction', direction);
     const { data: completedRows, count: completed } = await progressQuery;
 
-    // Words learned = completed lessons × avg words per lesson (10)
-    const wordsLearned = (completed || 0) * 10;
+    // Words learned = sum of actual word counts from completed lessons
+    // Join lesson word_count for accurate count
+    let wordsQuery = supabase
+      .from('lesson_progress')
+      .select('lesson_id, quiz_score, quiz_total, lessons(word_count)', { count: 'exact' })
+      .eq('user_id', userId)
+      .eq('quiz_completed', true);
+    if (direction) wordsQuery = wordsQuery.eq('direction', direction);
+    const { data: completedData } = await wordsQuery;
 
-    // Accuracy = average quiz score across completed lessons
-    const scores = (completedRows || []).map(r => r.quiz_score || 0);
-    const accuracy = scores.length > 0
-      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+    const wordsLearned = (completedData || []).reduce((sum, r) => {
+      return sum + (r.lessons?.word_count || 10);
+    }, 0);
+
+    // Accuracy = average of (score/total)*100 per lesson
+    const accuracyScores = (completedData || [])
+      .filter(r => r.quiz_total > 0)
+      .map(r => Math.round((r.quiz_score / r.quiz_total) * 100));
+    const accuracy = accuracyScores.length > 0
+      ? Math.round(accuracyScores.reduce((a, b) => a + b, 0) / accuracyScores.length)
       : 0;
 
-    // XP = wordsLearned * 2
-    const xp = wordsLearned * 2;
+    // XP from streak table
+    let xp = 0;
+    try {
+      const { data: userRow } = await supabase.from('users').select('id').eq('supabase_uid', userId).single();
+      if (userRow) {
+        const { data: streakRow } = await supabase.from('streaks').select('total_xp').eq('user_id', userRow.id).single();
+        xp = streakRow?.total_xp || 0;
+      }
+    } catch(_) {}
 
     return {
-      total:        totalLessons || 0,
+      total:         totalLessons || 0,
       total_lessons: totalLessons || 0,
-      completed:    completed    || 0,
+      completed:     completed    || 0,
       words_learned: wordsLearned,
       accuracy,
       xp,
@@ -164,6 +184,7 @@ export default async function progressRoutes(fastify) {
           direction,
           quiz_completed: true,
           quiz_score:     score || 0,
+          quiz_total:     total || 0,
           completed_at:   new Date().toISOString(),
         })
         .eq('user_id', userId)
@@ -173,12 +194,13 @@ export default async function progressRoutes(fastify) {
       const { error: insertErr } = await supabase
         .from('lesson_progress')
         .insert({
-          user_id:        userId,
+          user_id:          userId,
           lesson_id,
           direction,
           listen_completed: true,
           quiz_completed:   true,
           quiz_score:       score || 0,
+          quiz_total:       total || 0,
           completed_at:     new Date().toISOString(),
           unlocked:         true,
         });
@@ -239,7 +261,7 @@ export default async function progressRoutes(fastify) {
 
       if (userProfile) {
         const today = new Date().toISOString().split('T')[0];
-        const xpGained = Math.max(1, Math.round((score / (total || 1)) * 20));
+        const xpGained = Math.max(5, Math.round((score / (total || 1)) * 50));
 
         const { data: streakRow } = await supabase
           .from('streaks')
