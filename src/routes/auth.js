@@ -37,6 +37,7 @@ export default async function authRoutes(fastify) {
     // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
     return reply.code(201).send({
       token: authData.session?.access_token || null,
+      refresh_token: authData.session?.refresh_token || null,
       user:  profile
     });
   });
@@ -61,7 +62,7 @@ export default async function authRoutes(fastify) {
     if (profileError) return reply.code(400).send({ error: profileError.message });
 
     // ── Return `token` (not `jwt`) so Android AuthResponse matches ──
-    return { token: authData.session?.access_token, user: profile };
+    return { token: authData.session?.access_token, refresh_token: authData.session?.refresh_token, user: profile };
   });
 
   // ── POST /forgot-password ──────────────────────────────
@@ -128,5 +129,21 @@ export default async function authRoutes(fastify) {
     if (dbError) return reply.code(400).send({ error: dbError.message });
 
     return { success: true };
+  });
+
+  // ── POST /auth/refresh ─────────────────────────────────
+  fastify.post('/refresh', async (request, reply) => {
+    const { refresh_token } = request.body;
+    if (!refresh_token) return reply.code(400).send({ error: 'refresh_token required' });
+    try {
+      const { data, error } = await supabase.auth.refreshSession({ refresh_token });
+      if (error || !data.session) return reply.code(401).send({ error: 'Invalid or expired refresh token' });
+      return {
+        token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      };
+    } catch (err) {
+      return reply.code(500).send({ error: err.message });
+    }
   });
 }
