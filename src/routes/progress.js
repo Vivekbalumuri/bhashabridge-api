@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { recordActivity } from '../services/streakService.js';
 
 export default async function progressRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
@@ -24,7 +25,6 @@ export default async function progressRoutes(fastify) {
     const { data: completedRows, count: completed } = await progressQuery;
 
     // Words learned = sum of actual word counts from completed lessons
-    // Join lesson word_count for accurate count
     let wordsQuery = supabase
       .from('lesson_progress')
       .select('lesson_id, quiz_score, quiz_total, lessons(word_count)', { count: 'exact' })
@@ -53,7 +53,7 @@ export default async function progressRoutes(fastify) {
         const { data: streakRow } = await supabase.from('streaks').select('total_xp').eq('user_id', userRow.id).single();
         xp = streakRow?.total_xp || 0;
       }
-    } catch(_) {}
+    } catch (_) {}
 
     return {
       total:         totalLessons || 0,
@@ -93,17 +93,17 @@ export default async function progressRoutes(fastify) {
 
     let foundCurrent = false;
     const result = lessons.map((lesson, index) => {
-      const progress  = progressMap[lesson.id];
-      const isFirst   = index === 0;
+      const progress   = progressMap[lesson.id];
+      const isFirst    = index === 0;
       const prevLesson = index > 0 ? lessons[index - 1] : null;
-      const prevDone  = prevLesson
+      const prevDone   = prevLesson
         ? progressMap[prevLesson.id]?.quiz_completed === true
         : true;
 
-      const unlocked        = isFirst || prevDone || progress?.unlocked === true;
+      const unlocked         = isFirst || prevDone || progress?.unlocked === true;
       const listen_completed = progress?.listen_completed || false;
-      const quiz_completed  = progress?.quiz_completed   || false;
-      const fully_completed = listen_completed && quiz_completed;
+      const quiz_completed   = progress?.quiz_completed   || false;
+      const fully_completed  = listen_completed && quiz_completed;
 
       const is_current = unlocked && !fully_completed && !foundCurrent;
       if (is_current) foundCurrent = true;
@@ -134,7 +134,6 @@ export default async function progressRoutes(fastify) {
 
     const userId = request.user.id;
 
-    // First check if record exists
     const { data: existing } = await supabase
       .from('lesson_progress')
       .select('id')
@@ -169,6 +168,7 @@ export default async function progressRoutes(fastify) {
 
     const userId = request.user.id;
 
+    // ── 1. Upsert lesson progress ───────────────────────────────────────────
     const { data: existingQuiz } = await supabase
       .from('lesson_progress')
       .select('id')
@@ -209,7 +209,7 @@ export default async function progressRoutes(fastify) {
 
     if (progressError) return reply.code(400).send({ error: progressError.message });
 
-    // Unlock next lesson
+    // ── 2. Unlock next lesson ───────────────────────────────────────────────
     const { data: currentLesson } = await supabase
       .from('lessons')
       .select('module_order')
@@ -229,6 +229,7 @@ export default async function progressRoutes(fastify) {
 
       if (nextLesson) {
         next_lesson_id = nextLesson.id;
+
         const { data: existingNext } = await supabase
           .from('lesson_progress')
           .select('id')
@@ -254,52 +255,28 @@ export default async function progressRoutes(fastify) {
       }
     }
 
-    // Update streak — increment xp and update last_activity_date
+    // ── 3. Update streak via streakService (fixes silent failure bug) ───────
+    // OLD code used update() which silently skipped users with no streak row.
+    // streakService uses upsert() so it works for ALL users including new ones.
     try {
       const { data: userProfile } = await supabase
-        .from('users').select('id').eq('supabase_uid', userId).single();
+        .from('users')
+        .select('id')
+        .eq('supabase_uid', userId)
+        .single();
 
       if (userProfile) {
-        const today = new Date().toISOString().split('T')[0];
         const xpGained = Math.max(5, Math.round((score / (total || 1)) * 50));
-
-        const { data: streakRow } = await supabase
-          .from('streaks')
-          .select('*')
-          .eq('user_id', userProfile.id)
-          .single();
-
-        if (streakRow) {
-          const lastDate = streakRow.last_activity_date;
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
-          const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-          const newStreak = lastDate === today
-            ? streakRow.current_streak
-            : lastDate === yesterdayStr
-              ? streakRow.current_streak + 1
-              : 1;
-
-          const newXp    = (streakRow.total_xp || 0) + xpGained;
-          const newLevel = Math.floor(newXp / 100) + 1;
-
-          await supabase.from('streaks').update({
-            current_streak:     newStreak,
-            longest_streak:     Math.max(newStreak, streakRow.longest_streak || 0),
-            total_xp:           newXp,
-            level:              newLevel,
-            last_activity_date: today,
-          }).eq('user_id', userProfile.id);
-        }
+        await recordActivity(userProfile.id, xpGained);
       }
-    } catch (_) { /* streak update is non-critical */ }
+    } catch (_) { /* streak update is non-critical, never block the response */ }
 
+    // ── 4. Return result ────────────────────────────────────────────────────
     return {
       success:              true,
       message:              'Quiz completed',
-      score:                score  || 0,
-      total:                total  || 0,
+      score:                score || 0,
+      total:                total || 0,
       next_lesson_id,
       next_lesson_unlocked,
     };
@@ -332,7 +309,7 @@ export default async function progressRoutes(fastify) {
     };
   });
 
-  // ─── POST /progress/reset ──────────────────────────────────────────────────
+  // ─── POST /progress/reset ───────────────────────────────────────────────────
   fastify.post('/reset', async (request, reply) => {
     const { lesson_id } = request.body;
     if (!lesson_id) return reply.code(400).send({ error: 'lesson_id is required' });
