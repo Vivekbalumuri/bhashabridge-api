@@ -6,14 +6,11 @@ export default async function wordsRoutes(fastify) {
   // ─── GET /words/daily ─────────────────────────────────────────────────────
   // MUST be registered BEFORE /:id — otherwise "daily" is parsed as a UUID
   fastify.get('/daily', async (request, reply) => {
-    // Pick word of the day based on date (same word for everyone each day)
     const today = new Date();
     const dayOfYear = Math.floor(
       (today - new Date(today.getFullYear(), 0, 0)) / 86400000
     );
 
-    // Fetch from te-en lessons only — avoids returning duplicate english words
-    // across the 6 direction copies in the words table
     const { data: lessons } = await supabase
       .from('lessons')
       .select('id')
@@ -39,6 +36,40 @@ export default async function wordsRoutes(fastify) {
 
     const word = words[dayOfYear % words.length];
     return { word };
+  });
+
+  // ─── GET /words?direction= ────────────────────────────────────────────────
+  // FIX: new endpoint for CardsScreen — returns all words for a direction.
+  // Must be registered BEFORE /:id so "direction" param isn't parsed as a UUID.
+  fastify.get('/', async (request, reply) => {
+    const { direction } = request.query;
+
+    if (!direction) {
+      return reply.code(400).send({ error: 'direction query param is required' });
+    }
+
+    // Fetch all lessons for this direction
+    const { data: lessons, error: lessonsError } = await supabase
+      .from('lessons')
+      .select('id')
+      .eq('direction', direction);
+
+    if (lessonsError) return reply.code(400).send({ error: lessonsError.message });
+    if (!lessons || lessons.length === 0) {
+      return { words: [], total: 0 };
+    }
+
+    const lessonIds = lessons.map(l => l.id);
+
+    const { data: words, error } = await supabase
+      .from('words')
+      .select('id, english, tamil, telugu, translit_tamil, translit_telugu, dravidian_note, category, difficulty')
+      .in('lesson_id', lessonIds)
+      .order('created_at', { ascending: true });
+
+    if (error) return reply.code(400).send({ error: error.message });
+
+    return { words: words || [], total: words?.length ?? 0 };
   });
 
   // ─── GET /words/:id ───────────────────────────────────────────────────────
