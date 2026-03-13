@@ -99,35 +99,30 @@ export default async function lessonsRoutes(fastify) {
     const allLangs  = ['te', 'ta', 'en'];
     const thirdLang = allLangs.find(l => l !== fromLang && l !== toLang);
 
-    const flashcards = words.map((word, index) => {
-      const from  = fieldMap[fromLang];
-      const to    = fieldMap[toLang];
-      const also  = fieldMap[thirdLang];
+    // Front is ALWAYS English (the universal hint language)
+    // Back is ALWAYS the non-English language being learned
+    const nonEnglishLang = fromLang !== 'en' ? fromLang : toLang;
+    const targetField    = fieldMap[nonEnglishLang];
 
+    const flashcards = words.map((word, index) => {
       return {
         index,
         word_id: word.id,
-        // FRONT — user's known language (shown first to trigger memory recall)
+        // FRONT — always English
         front: {
-          text:            word[from.text]  || '',
-          translit:        from.translit    ? (word[from.translit] || null) : null,
-          lang:            langName[fromLang],
-          audio_text:      word[from.text]  || '',
-          audio_lang_code: from.tts_code,
+          text:            word.english  || '',
+          translit:        null,
+          lang:            'english',
+          audio_text:      word.english  || '',
+          audio_lang_code: 'en',
         },
-        // BACK — the language being learned (the answer to reveal)
+        // BACK — always the target language (Telugu or Tamil)
         back: {
-          text:            word[to.text]    || '',
-          translit:        to.translit      ? (word[to.translit] || null) : null,
-          lang:            langName[toLang],
-          audio_text:      word[to.text]    || '',
-          audio_lang_code: to.tts_code,
-        },
-        // ALSO — third language (always shown as bonus)
-        also: {
-          text:     word[also.text]   || '',
-          translit: also.translit     ? (word[also.translit] || null) : null,
-          lang:     langName[thirdLang],
+          text:            word[targetField.text]    || '',
+          translit:        targetField.translit ? (word[targetField.translit] || null) : null,
+          lang:            langName[nonEnglishLang],
+          audio_text:      word[targetField.text]    || '',
+          audio_lang_code: targetField.tts_code,
         },
         dravidian_note: word.dravidian_note || null,
       };
