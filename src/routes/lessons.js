@@ -1,128 +1,118 @@
 import { supabase } from '../db.js';
 
-export default async function lessonsRoutes(fastify) {
+// Helper: get source/target text from a word row based on direction
+function getLangText(word, langCode) {
+  switch (langCode) {
+    case 'te': return { text: word.telugu  || '', translit: word.translit_telugu  || null };
+    case 'ta': return { text: word.tamil   || '', translit: word.translit_tamil   || null };
+    case 'ml': return { text: word.malayalam || '', translit: word.translit_malayalam || null };
+    default:   return { text: word.english || '', translit: null };
+  }
+}
+
+// Helper: pick the "also" (third bonus) language — not source, not target
+function getAlsoLang(sourceLang, targetLang) {
+  const all = ['te', 'ta', 'ml', 'en'];
+  return all.find(l => l !== sourceLang && l !== targetLang) || 'en';
+}
+
+// Helper: deduplicate words by english field — keep first occurrence
+function dedupWords(words) {
+  const seen = new Set();
+  return words.filter(w => {
+    if (seen.has(w.english)) return false;
+    seen.add(w.english);
+    return true;
+  });
+}
+
+export default async function lessonRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
-  // GET /lessons?direction=te-en
+  // ── GET /lessons?direction= ───────────────────────────────────────────────
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
-    if (!direction) return reply.code(400).send({ error: 'direction is required' });
 
-    const { data: lessons, error } = await supabase
+    let query = supabase
       .from('lessons')
-      .select('*')
-      .eq('direction', direction)
+      .select('id, title, description, direction, module_order, order_index, is_premium, skill_type, word_count, tier, xp_reward')
       .order('module_order', { ascending: true });
 
+    if (direction) query = query.eq('direction', direction);
+
+    const { data: lessons, error } = await query;
     if (error) return reply.code(400).send({ error: error.message });
-    return { lessons };
+
+    return { lessons: lessons || [] };
   });
 
-  // GET /lessons/:id
-  fastify.get('/:id', async (request, reply) => {
-    const { id } = request.params;
-
-    const { data: lesson, error: lessonError } = await supabase
-      .from('lessons')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (lessonError) return reply.code(400).send({ error: lessonError.message });
-
-    const { data: words, error: wordsError } = await supabase
-      .from('words')
-      .select('*')
-      .eq('lesson_id', id)
-      .order('sort_order', { ascending: true });
-
-    if (wordsError) return reply.code(400).send({ error: wordsError.message });
-
-    return { lesson, words };
-  });
-
-  // ─── GET /lessons/:id/learn ─────────────────────────────────────────────────
-  // Flashcard teaching phase.
-  // front = language being learned (toLang)
-  // back  = user's base language (fromLang) — what they already know
-  // script is included for all but hidden by Android for free users
-  //
-  // Each card also carries `audio_text` + `audio_lang` so Android TTS
-  // can speak the word using:
-  //   val locale = Locale("te") / Locale("ta") / Locale("en")
-  //   tts.language = locale
-  //   tts.speak(card.audio_text, ...)
-  //
-  // Response:
-  // {
-  //   lesson, phase:"learn", total_cards,
-  //   base_lang: "telugu",        ← user knows this already
-  //   learn_lang: "english",      ← user is learning this
-  //   flashcards: [{
-  //     index, word_id,
-  //     front: { text, translit, lang, audio_text, audio_lang_code },
-  //     back:  { text, translit, lang },
-  //     also:  { text, translit, lang },
-  //     dravidian_note
-  //   }]
-  // }
+  // ── GET /lessons/:id/learn ────────────────────────────────────────────────
   fastify.get('/:id/learn', async (request, reply) => {
     const { id } = request.params;
 
+    // Fetch the lesson
     const { data: lesson, error: lessonError } = await supabase
       .from('lessons')
       .select('*')
       .eq('id', id)
       .single();
 
-    if (lessonError) return reply.code(404).send({ error: 'Lesson not found' });
+    if (lessonError || !lesson) {
+      return reply.code(404).send({ error: 'Lesson not found' });
+    }
 
-    const { data: words, error: wordsError } = await supabase
+    // Fetch words for this lesson
+    const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
       .eq('lesson_id', id)
-      .order('sort_order', { ascending: true });
+      .order('created_at', { ascending: true });
 
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
-    if (!words || words.length === 0)
+
+    // DEDUP — prevents 500 from duplicate word rows
+    const words = dedupWords(rawWords || []);
+
+    if (words.length === 0) {
       return reply.code(404).send({ error: 'No words found for this lesson' });
+    }
 
-    // direction = "te-en" means user knows Telugu, learning English
-    const [fromLang, toLang] = (lesson.direction || 'te-en').split('-');
+    // Parse direction to get source and target language codes
+    const direction  = lesson.direction || 'te-en';
+    const parts      = direction.split('-');
+    const sourceLang = parts[0]; // language being learned (front of card)
+    const targetLang = parts[1]; // user's base language   (back of card)
+    const alsoLang   = getAlsoLang(sourceLang, targetLang);
 
-    const fieldMap = {
-      te: { text: 'telugu',  translit: 'translit_telugu', tts_code: 'te' },
-      ta: { text: 'tamil',   translit: 'translit_tamil',  tts_code: 'ta' },
-      en: { text: 'english', translit: null,               tts_code: 'en' },
-    };
-    const langName = { te: 'telugu', ta: 'tamil', en: 'english' };
-    const allLangs  = ['te', 'ta', 'en'];
-    const thirdLang = allLangs.find(l => l !== fromLang && l !== toLang);
-
-    // Front is ALWAYS English (the universal hint language)
-    // Back is ALWAYS the non-English language being learned
-    const nonEnglishLang = fromLang !== 'en' ? fromLang : toLang;
-    const targetField    = fieldMap[nonEnglishLang];
-
+    // Build flashcards
     const flashcards = words.map((word, index) => {
+      const front = getLangText(word, sourceLang);
+      const back  = getLangText(word, targetLang);
+      const also  = getLangText(word, alsoLang);
+
       return {
         index,
         word_id: word.id,
-        // FRONT — always English
         front: {
-          text:            word.english  || '',
-          translit:        null,
-          lang:            'english',
-          audio_text:      word.english  || '',
-          audio_lang_code: 'en',
+          text:            front.text,
+          translit:        front.translit,
+          lang:            sourceLang,
+          audio_text:      front.text,
+          audio_lang_code: sourceLang,
         },
-        // BACK — always the target language (Telugu or Tamil)
         back: {
-          text:            word[targetField.text]    || '',
-          translit:        targetField.translit ? (word[targetField.translit] || null) : null,
-          lang:            langName[nonEnglishLang],
-          audio_text:      word[targetField.text]    || '',
-          audio_lang_code: targetField.tts_code,
+          text:            back.text,
+          translit:        back.translit,
+          lang:            targetLang,
+          audio_text:      back.text,
+          audio_lang_code: targetLang,
+        },
+        also: {
+          text:            also.text,
+          translit:        also.translit,
+          lang:            alsoLang,
+          audio_text:      also.text,
+          audio_lang_code: alsoLang,
         },
         dravidian_note: word.dravidian_note || null,
       };
@@ -131,46 +121,16 @@ export default async function lessonsRoutes(fastify) {
     return {
       lesson,
       phase:       'learn',
-      base_lang:   langName[fromLang],
-      learn_lang:  langName[toLang],
+      base_lang:   targetLang,
+      learn_lang:  sourceLang,
       total_cards: flashcards.length,
       flashcards,
     };
   });
 
-  // ─── GET /lessons/:id/quiz ──────────────────────────────────────────────────
-  // Quiz phase — only accessible after listen is completed.
-  // question = word in learn_lang (what they just studied)
-  // options  = 4 choices in base_lang (what they know)
-  // Enforces: must have listen_completed = true in lesson_progress
-  //
-  // Response:
-  // {
-  //   lesson, phase:"quiz", total_questions,
-  //   questions: [{
-  //     index, word_id,
-  //     question: { text, translit, lang, audio_text, audio_lang_code },
-  //     options:  [{ id, text, correct }, ...]   ← shuffled
-  //   }]
-  // }
+  // ── GET /lessons/:id/quiz ─────────────────────────────────────────────────
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
-    const userId = request.user.id;
-
-    // Enforce: user must have completed listen phase first
-    const { data: progress } = await supabase
-      .from('lesson_progress')
-      .select('listen_completed')
-      .eq('user_id', userId)
-      .eq('lesson_id', id)
-      .single();
-
-    if (!progress?.listen_completed) {
-      return reply.code(403).send({
-        error:   'listen_required',
-        message: 'You must complete the listen phase before taking the quiz.',
-      });
-    }
 
     const { data: lesson, error: lessonError } = await supabase
       .from('lessons')
@@ -178,57 +138,64 @@ export default async function lessonsRoutes(fastify) {
       .eq('id', id)
       .single();
 
-    if (lessonError) return reply.code(404).send({ error: 'Lesson not found' });
+    if (lessonError || !lesson) {
+      return reply.code(404).send({ error: 'Lesson not found' });
+    }
 
-    const { data: words, error: wordsError } = await supabase
+    const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
       .eq('lesson_id', id)
-      .order('sort_order', { ascending: true });
+      .order('created_at', { ascending: true });
 
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
-    if (!words || words.length === 0)
+
+    // DEDUP — prevents 500 from duplicate word rows
+    const words = dedupWords(rawWords || []);
+
+    if (words.length === 0) {
       return reply.code(404).send({ error: 'No words found for this lesson' });
+    }
 
-    const [fromLang, toLang] = (lesson.direction || 'te-en').split('-');
+    const direction  = lesson.direction || 'te-en';
+    const parts      = direction.split('-');
+    const sourceLang = parts[0];
+    const targetLang = parts[1];
 
-    const fieldMap = {
-      te: { text: 'telugu',  translit: 'translit_telugu', tts_code: 'te' },
-      ta: { text: 'tamil',   translit: 'translit_tamil',  tts_code: 'ta' },
-      en: { text: 'english', translit: null,               tts_code: 'en' },
-    };
-    const langName = { te: 'telugu', ta: 'tamil', en: 'english' };
-
-    const from = fieldMap[fromLang];
-    const to   = fieldMap[toLang];
-
+    // Build MCQ questions — question is source lang, options are target lang
     const questions = words.map((word, index) => {
-      const distractors = words
-        .filter(w => w.id !== word.id)
-        .sort(() => Math.random() - 0.5)
-        .slice(0, 3);
+      const questionSide = getLangText(word, sourceLang);
+      const correctSide  = getLangText(word, targetLang);
 
-      const options = [
-        { id: word.id, text: word[from.text] || '', correct: true },
-        ...distractors.map(d => ({
-          id:      d.id,
-          text:    d[from.text] || '',
-          correct: false,
-        })),
-      ].sort(() => Math.random() - 0.5);
+      // Pick 3 wrong options from other words in the lesson
+      const otherWords = words.filter(w => w.id !== word.id);
+      const shuffled   = otherWords.sort(() => Math.random() - 0.5).slice(0, 3);
+      const wrongOptions = shuffled.map(w => ({
+        id:      w.id + '_wrong',
+        text:    getLangText(w, targetLang).text,
+        correct: false,
+      }));
+
+      // Insert correct option at random position
+      const correctOption = {
+        id:      word.id + '_correct',
+        text:    correctSide.text,
+        correct: true,
+      };
+      const insertAt = Math.floor(Math.random() * 4);
+      const options  = [...wrongOptions];
+      options.splice(insertAt, 0, correctOption);
 
       return {
         index,
         word_id: word.id,
-        // Question shows the learned language word
         question: {
-          text:            word[to.text]    || '',
-          translit:        to.translit      ? (word[to.translit] || null) : null,
-          lang:            langName[toLang],
-          audio_text:      word[to.text]    || '',
-          audio_lang_code: to.tts_code,
+          text:            questionSide.text,
+          translit:        questionSide.translit,
+          lang:            sourceLang,
+          audio_text:      questionSide.text,
+          audio_lang_code: sourceLang,
         },
-        // Options are in base language (what user knows)
         options,
       };
     });
@@ -236,8 +203,8 @@ export default async function lessonsRoutes(fastify) {
     return {
       lesson,
       phase:           'quiz',
-      base_lang:       langName[fromLang],
-      learn_lang:      langName[toLang],
+      base_lang:       targetLang,
+      learn_lang:      sourceLang,
       total_questions: questions.length,
       questions,
     };
