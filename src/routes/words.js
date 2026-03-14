@@ -4,7 +4,6 @@ export default async function wordsRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
   // ─── GET /words/daily ─────────────────────────────────────────────────────
-  // MUST be registered BEFORE /:id — otherwise "daily" is parsed as a UUID
   fastify.get('/daily', async (request, reply) => {
     const today = new Date();
     const dayOfYear = Math.floor(
@@ -25,7 +24,7 @@ export default async function wordsRoutes(fastify) {
 
     const { data: words, error } = await supabase
       .from('words')
-      .select('id, english, tamil, telugu, translit_tamil, translit_telugu, dravidian_note, category')
+      .select('id, english, tamil, telugu, malayalam, translit_tamil, translit_telugu, translit_malayalam, dravidian_note, category')
       .in('lesson_id', lessonIds)
       .order('created_at', { ascending: true })
       .limit(300);
@@ -39,8 +38,6 @@ export default async function wordsRoutes(fastify) {
   });
 
   // ─── GET /words?direction= ────────────────────────────────────────────────
-  // FIX: new endpoint for CardsScreen — returns all words for a direction.
-  // Must be registered BEFORE /:id so "direction" param isn't parsed as a UUID.
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
 
@@ -48,7 +45,6 @@ export default async function wordsRoutes(fastify) {
       return reply.code(400).send({ error: 'direction query param is required' });
     }
 
-    // Fetch all lessons for this direction
     const { data: lessons, error: lessonsError } = await supabase
       .from('lessons')
       .select('id')
@@ -63,7 +59,7 @@ export default async function wordsRoutes(fastify) {
 
     const { data: words, error } = await supabase
       .from('words')
-      .select('id, english, tamil, telugu, translit_tamil, translit_telugu, dravidian_note, category, difficulty')
+      .select('id, english, tamil, telugu, malayalam, translit_tamil, translit_telugu, translit_malayalam, dravidian_note, category, difficulty')
       .in('lesson_id', lessonIds)
       .order('created_at', { ascending: true });
 
