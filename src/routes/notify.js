@@ -1,69 +1,64 @@
-import { supabase } from '../db.js';
-import { sendToAll } from '../services/notifyService.js';
+// src/routes/notify.js
+// PATCH /auth/me/fcm-token  — saves FCM registration token for the logged-in user
+// POST  /notify/test        — sends a test notification to the calling user (dev only)
 
 export default async function notifyRoutes(fastify) {
-  fastify.addHook('preHandler', async (request, reply) => {
-    const serviceKey = request.headers['x-service-key'];
-    if (serviceKey !== process.env.SUPABASE_SERVICE_KEY) {
-      return reply.code(403).send({ error: "Forbidden: Invalid service key" });
+
+  // ── PATCH /auth/me/fcm-token ────────────────────────────────────────────────
+  fastify.patch(
+    '/auth/me/fcm-token',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const { fcm_token } = request.body ?? {};
+      if (!fcm_token || typeof fcm_token !== 'string') {
+        return reply.status(400).send({ error: 'fcm_token is required' });
+      }
+
+      const userId = request.user?.sub ?? request.user?.id;
+      const { error } = await fastify.supabase
+        .from('users')
+        .update({ fcm_token })
+        .eq('supabase_uid', userId);
+
+      if (error) {
+        fastify.log.error(error);
+        return reply.status(500).send({ error: 'Failed to save FCM token' });
+      }
+
+      return reply.send({ success: true });
     }
-  });
+  );
 
-  fastify.post('/daily-word', async (request, reply) => {
-    const todayStr = new Date().toISOString().split('T')[0];
-    
-    const { data: dailyWordMap } = await supabase
-      .from('daily_words')
-      .select('*, words(tamil, telugu, english)')
-      .eq('show_date', todayStr)
-      .single();
-      
-    if (!dailyWordMap) {
-      return reply.code(404).send({ error: "No daily word found for today" });
+  // ── POST /notify/test ──────────────────────────────────────────────────────
+  // Only available in non-production — sends a test push to the calling user
+  fastify.post(
+    '/notify/test',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      if (process.env.NODE_ENV === 'production') {
+        return reply.status(403).send({ error: 'Not available in production' });
+      }
+
+      const userId = request.user?.sub ?? request.user?.id;
+      const { data: user } = await fastify.supabase
+        .from('users')
+        .select('fcm_token, display_name')
+        .eq('supabase_uid', userId)
+        .single();
+
+      if (!user?.fcm_token) {
+        return reply.status(404).send({ error: 'No FCM token on file for this user' });
+      }
+
+      const { sendPushNotification } = await import('../services/notifyService.js');
+      await sendPushNotification({
+        token: user.fcm_token,
+        title: `Hey ${user.display_name?.split(' ')[0] ?? 'Learner'}! 👋`,
+        body:  'This is a test notification from BhashaBridge 🎉',
+        data:  { screen: 'lessons' },
+      });
+
+      return reply.send({ success: true, message: 'Test notification sent' });
     }
-
-    const word = dailyWordMap.words;
-    const { data: users } = await supabase
-      .from('users')
-      .select('fcm_token')
-      .not('fcm_token', 'is', null);
-
-    if (!users || users.length === 0) return { sent: 0 };
-
-    const tokens = users.map(u => u.fcm_token).filter(t => t);
-    
-    const result = await sendToAll(tokens, {
-      title: "Today's Word in BhashaBridge! 📚",
-      body: `Learn to say '${word.english}' in Tamil (${word.tamil}) and Telugu (${word.telugu})!`,
-      data: { route: 'daily-word' }
-    });
-
-    return { sent: result.successCount };
-  });
-
-  fastify.post('/streak-alert', async (request, reply) => {
-    const todayStr = new Date().toISOString().split('T')[0];
-
-    const { data: users, error } = await supabase
-      .from('users')
-      .select('id, fcm_token, last_active_at')
-      .not('fcm_token', 'is', null);
-
-    if (error) return reply.code(400).send({ error: error.message });
-
-    const tokensToAlert = users
-      .filter(u => !u.last_active_at || !u.last_active_at.startsWith(todayStr))
-      .map(u => u.fcm_token)
-      .filter(t => t);
-
-    if (tokensToAlert.length === 0) return { sent: 0 };
-
-    const result = await sendToAll(tokensToAlert, {
-      title: "Don't break your streak! 🔥",
-      body: "Keep learning on BhashaBridge today to maintain your streak.",
-      data: { route: 'streak' }
-    });
-
-    return { sent: result.successCount };
-  });
+  );
 }

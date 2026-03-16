@@ -1,84 +1,80 @@
-import { supabase } from '../db.js';
+// src/routes/words.js
+// GET /words/daily   — deterministic daily word based on UTC date + direction
+// GET /words         — all words for a lesson_id
+// GET /words/:id     — single word
 
-export default async function wordsRoutes(fastify) {
-  fastify.addHook('preHandler', fastify.authenticate);
+import { getDailyWord } from '../services/wordOfDayService.js';
 
-  // ─── GET /words/daily ─────────────────────────────────────────────────────
-  fastify.get('/daily', async (request, reply) => {
-    const today = new Date();
-    const dayOfYear = Math.floor(
-      (today - new Date(today.getFullYear(), 0, 0)) / 86400000
-    );
+export default async function wordRoutes(fastify) {
 
-    const { data: lessons } = await supabase
-      .from('lessons')
-      .select('id')
-      .eq('direction', 'te-en')
-      .limit(50);
+  // ── GET /words/daily ────────────────────────────────────────────────────
+  // ?direction=te-en  (optional — falls back to user's stored direction or te-en)
+  fastify.get(
+    '/words/daily',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        // Direction from query param, or fall back to te-en
+        const direction = request.query.direction ?? 'te-en';
+        const word = await getDailyWord(fastify.supabase, direction);
 
-    if (!lessons || lessons.length === 0) {
-      return reply.code(404).send({ error: 'No lessons found' });
+        if (!word) {
+          return reply.status(404).send({ error: 'No word found' });
+        }
+
+        return reply.send({ word });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(500).send({ error: 'Failed to fetch daily word' });
+      }
     }
+  );
 
-    const lessonIds = lessons.map(l => l.id);
+  // ── GET /words ───────────────────────────────────────────────────────────
+  // ?lesson_id=<uuid>  returns all words for that lesson
+  fastify.get(
+    '/words',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const { lesson_id } = request.query;
 
-    const { data: words, error } = await supabase
-      .from('words')
-      .select('id, english, tamil, telugu, malayalam, translit_tamil, translit_telugu, translit_malayalam, dravidian_note, category')
-      .in('lesson_id', lessonIds)
-      .order('created_at', { ascending: true })
-      .limit(300);
+      if (!lesson_id) {
+        return reply.status(400).send({ error: 'lesson_id is required' });
+      }
 
-    if (error || !words || words.length === 0) {
-      return reply.code(404).send({ error: 'No words found' });
+      const { data: words, error } = await fastify.supabase
+        .from('words')
+        .select('*')
+        .eq('lesson_id', lesson_id)
+        .order('sort_order');
+
+      if (error) {
+        fastify.log.error(error);
+        return reply.status(500).send({ error: 'Failed to fetch words' });
+      }
+
+      return reply.send({ words, total: words.length });
     }
+  );
 
-    const word = words[dayOfYear % words.length];
-    return { word };
-  });
+  // ── GET /words/:id ───────────────────────────────────────────────────────
+  fastify.get(
+    '/words/:id',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const { id } = request.params;
 
-  // ─── GET /words?direction= ────────────────────────────────────────────────
-  fastify.get('/', async (request, reply) => {
-    const { direction } = request.query;
+      const { data: word, error } = await fastify.supabase
+        .from('words')
+        .select('*')
+        .eq('id', id)
+        .single();
 
-    if (!direction) {
-      return reply.code(400).send({ error: 'direction query param is required' });
+      if (error || !word) {
+        return reply.status(404).send({ error: 'Word not found' });
+      }
+
+      return reply.send({ word });
     }
-
-    const { data: lessons, error: lessonsError } = await supabase
-      .from('lessons')
-      .select('id')
-      .eq('direction', direction);
-
-    if (lessonsError) return reply.code(400).send({ error: lessonsError.message });
-    if (!lessons || lessons.length === 0) {
-      return { words: [], total: 0 };
-    }
-
-    const lessonIds = lessons.map(l => l.id);
-
-    const { data: words, error } = await supabase
-      .from('words')
-      .select('id, english, tamil, telugu, malayalam, translit_tamil, translit_telugu, translit_malayalam, dravidian_note, category, difficulty')
-      .in('lesson_id', lessonIds)
-      .order('created_at', { ascending: true });
-
-    if (error) return reply.code(400).send({ error: error.message });
-
-    return { words: words || [], total: words?.length ?? 0 };
-  });
-
-  // ─── GET /words/:id ───────────────────────────────────────────────────────
-  fastify.get('/:id', async (request, reply) => {
-    const { id } = request.params;
-
-    const { data: word, error } = await supabase
-      .from('words')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) return reply.code(404).send({ error: 'Word not found' });
-    return { word };
-  });
+  );
 }

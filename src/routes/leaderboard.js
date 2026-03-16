@@ -1,52 +1,25 @@
-import { supabase } from '../db.js';
+// src/routes/leaderboard.js
+// GET /leaderboard  — returns top 50 users by XP with current user's rank
+
+import { getLeaderboard } from '../services/leaderService.js';
 
 export default async function leaderboardRoutes(fastify) {
-  fastify.addHook('preHandler', fastify.authenticate);
 
-  fastify.get('/weekly', async (request, reply) => {
-    const { limit = 50 } = request.query;
+  fastify.get(
+    '/leaderboard',
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const currentUserId = request.user?.sub ?? request.user?.id ?? null;
+        const limit = Math.min(parseInt(request.query.limit ?? '50'), 100);
 
-    const { data: userProfile, error: profileError } = await supabase
-      .from('users')
-      .select('id, is_premium')
-      .eq('supabase_uid', request.user.id)
-      .single();
+        const result = await getLeaderboard(fastify.supabase, currentUserId, limit);
+        return reply.send(result);
 
-    if (profileError) return reply.code(400).send({ error: profileError.message });
-    if (!userProfile.is_premium) {
-      return reply.code(403).send({ error: "Premium feature only" });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(500).send({ error: 'Failed to load leaderboard' });
+      }
     }
-
-    const date = new Date();
-    const day = date.getDay();
-    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-    const weekStart = new Date(date.setDate(diff)).toISOString().split('T')[0];
-
-    const { data: entries, error } = await supabase
-      .from('leaderboard')
-      .select('rank, weekly_xp, users(display_name)')
-      .eq('week_start', weekStart)
-      .order('rank', { ascending: true })
-      .limit(parseInt(limit, 10));
-
-    if (error) return reply.code(400).send({ error: error.message });
-
-    const formattedEntries = entries.map(e => ({
-      rank: e.rank,
-      displayName: e.users?.display_name || 'Anonymous',
-      weeklyXp: e.weekly_xp
-    }));
-
-    const { data: userRankRow } = await supabase
-      .from('leaderboard')
-      .select('rank')
-      .eq('week_start', weekStart)
-      .eq('user_id', userProfile.id)
-      .single();
-
-    return {
-      entries: formattedEntries,
-      userRank: userRankRow?.rank || null
-    };
-  });
+  );
 }

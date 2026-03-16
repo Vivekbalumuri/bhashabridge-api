@@ -1,78 +1,68 @@
-import { supabase } from '../db.js';
+// src/services/leaderService.js
+// Leaderboard logic — weekly XP rankings with current-user rank injection.
 
-function getMonday(d) {
-  const date = new Date(d);
-  const day = date.getDay();
-  const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-  return new Date(date.setDate(diff)).toISOString().split('T')[0];
-}
+export async function getLeaderboard(supabase, currentUserId, limit = 50) {
 
-export async function addXp(userId, xpEarned) {
-  const weekStart = getMonday(new Date());
-  
-  const { data: existing, error: fetchError } = await supabase
-    .from('leaderboard')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('week_start', weekStart)
-    .single();
+  // ── 1. Pull top N users by total_xp from streaks ──────────────────────────
+  const { data: rows, error } = await supabase
+    .from('streaks')
+    .select(`
+      user_id,
+      total_xp,
+      current_streak,
+      level,
+      users (
+        id,
+        display_name,
+        supabase_uid
+      )
+    `)
+    .order('total_xp', { ascending: false })
+    .limit(limit);
 
-  let weeklyXp = xpEarned;
-  let rowId = null;
+  if (error) throw error;
 
-  if (existing) {
-    weeklyXp += existing.weekly_xp;
-    rowId = existing.id;
-  }
+  // ── 2. Shape into leaderboard entries ─────────────────────────────────────
+  const entries = rows
+    .filter(r => r.users)       // skip orphaned streak rows
+    .map((r, index) => ({
+      user_id:        r.users.id,
+      display_name:   r.users.display_name ?? 'Learner',
+      total_xp:       r.total_xp       ?? 0,
+      current_streak: r.current_streak  ?? 0,
+      level:          r.level           ?? 1,
+      rank:           index + 1,
+      is_current_user: r.users.supabase_uid === currentUserId ||
+                       r.users.id           === currentUserId,
+    }));
 
-  const upsertData = {
-    user_id: userId,
-    week_start: weekStart,
-    weekly_xp: weeklyXp
-  };
-  
-  if (rowId) upsertData.id = rowId;
+  // ── 3. Find current user's rank (may be outside top N) ────────────────────
+  let currentUserRank = null;
+  const currentInList = entries.find(e => e.is_current_user);
 
-  const { data, error } = await supabase
-    .from('leaderboard')
-    .upsert(upsertData, { onConflict: 'user_id, week_start' })
-    .select()
-    .single();
-    
-  if (error) {
-    throw new Error(`Error adding XP: ${error.message}`);
-  }
-  
-  return data;
-}
+  if (currentInList) {
+    currentUserRank = currentInList.rank;
+  } else if (currentUserId) {
+    // User isn't in top N — find their actual rank
+    const { count, error: rankErr } = await supabase
+      .from('streaks')
+      .select('user_id', { count: 'exact', head: true })
+      .gt('total_xp', await getUserXp(supabase, currentUserId));
 
-export async function recalcRanks() {
-  const weekStart = getMonday(new Date());
-  
-  const { data: rows, error: fetchError } = await supabase
-    .from('leaderboard')
-    .select('*')
-    .eq('week_start', weekStart)
-    .order('weekly_xp', { ascending: false });
-    
-  if (fetchError) {
-    throw new Error(`Error fetching leaderboard: ${fetchError.message}`);
-  }
-  
-  let updatedCount = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const rank = i + 1;
-    if (rows[i].rank !== rank) {
-      const { error: updateError } = await supabase
-        .from('leaderboard')
-        .update({ rank })
-        .eq('id', rows[i].id);
-        
-      if (!updateError) {
-        updatedCount++;
-      }
+    if (!rankErr && count != null) {
+      currentUserRank = count + 1;
     }
   }
-  
-  return { updated: updatedCount };
+
+  return { entries, currentUserRank };
+}
+
+// Helper — get a single user's total_xp
+async function getUserXp(supabase, userId) {
+  const { data } = await supabase
+    .from('streaks')
+    .select('total_xp')
+    .or(`user_id.eq.${userId}`)
+    .single();
+  return data?.total_xp ?? 0;
 }
