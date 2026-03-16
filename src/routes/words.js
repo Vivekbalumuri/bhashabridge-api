@@ -1,17 +1,17 @@
 // src/routes/words.js
+// Registered in server.js with prefix: '/words'
+// So paths here must NOT include '/words' — just '/daily', '/', '/:id'
 import { supabase } from '../db.js';
 import { getDailyWord } from '../services/wordOfDayService.js';
 
 export default async function wordRoutes(fastify) {
 
   // ── GET /words/daily ──────────────────────────────────────────────────────
-  // CRITICAL: this route MUST be registered before /words/:id.
-  // Fastify matches routes in registration order. If /words/:id comes first,
-  // the literal string "daily" is captured as the :id param and this handler
-  // is never reached — causing a 404 because no word with id="daily" exists.
+  // MUST be registered before /:id — otherwise Fastify's wildcard catches
+  // the literal string "daily" as an :id param and this handler is skipped.
   // ?direction=te-en  (optional — defaults to te-en)
   fastify.get(
-    '/words/daily',
+    '/daily',
     { preHandler: fastify.authenticate },
     async (request, reply) => {
       try {
@@ -33,7 +33,7 @@ export default async function wordRoutes(fastify) {
   // ── GET /words ────────────────────────────────────────────────────────────
   // ?lesson_id=<uuid>
   fastify.get(
-    '/words',
+    '/',
     { preHandler: fastify.authenticate },
     async (request, reply) => {
       const { lesson_id } = request.query;
@@ -58,9 +58,9 @@ export default async function wordRoutes(fastify) {
   );
 
   // ── GET /words/:id ────────────────────────────────────────────────────────
-  // Registered LAST so it never shadows /words/daily or /words
+  // Registered LAST so it never shadows /daily or /
   fastify.get(
-    '/words/:id',
+    '/:id',
     { preHandler: fastify.authenticate },
     async (request, reply) => {
       const { id } = request.params;
