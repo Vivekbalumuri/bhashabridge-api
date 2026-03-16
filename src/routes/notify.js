@@ -1,36 +1,11 @@
 // src/routes/notify.js
-// PATCH /auth/me/fcm-token  — saves FCM registration token for the logged-in user
-// POST  /notify/test        — sends a test notification to the calling user (dev only)
+// POST /notify/test — sends a test push notification to the calling user (dev only)
+// NOTE: PATCH /auth/me/fcm-token is already handled in auth.js — do NOT duplicate it here
 
 export default async function notifyRoutes(fastify) {
 
-  // ── PATCH /auth/me/fcm-token ────────────────────────────────────────────────
-  fastify.patch(
-    '/auth/me/fcm-token',
-    { preHandler: fastify.authenticate },
-    async (request, reply) => {
-      const { fcm_token } = request.body ?? {};
-      if (!fcm_token || typeof fcm_token !== 'string') {
-        return reply.status(400).send({ error: 'fcm_token is required' });
-      }
-
-      const userId = request.user?.sub ?? request.user?.id;
-      const { error } = await fastify.supabase
-        .from('users')
-        .update({ fcm_token })
-        .eq('supabase_uid', userId);
-
-      if (error) {
-        fastify.log.error(error);
-        return reply.status(500).send({ error: 'Failed to save FCM token' });
-      }
-
-      return reply.send({ success: true });
-    }
-  );
-
   // ── POST /notify/test ──────────────────────────────────────────────────────
-  // Only available in non-production — sends a test push to the calling user
+  // Only available in non-production environments
   fastify.post(
     '/notify/test',
     { preHandler: fastify.authenticate },
