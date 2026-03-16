@@ -5,6 +5,8 @@ import { getDailyWord } from '../services/wordOfDayService.js';
 export default async function wordRoutes(fastify) {
 
   // ── GET /words/daily ──────────────────────────────────────────────────────
+  // MUST be registered before /words/:id — otherwise Fastify's :id wildcard
+  // captures the literal string "daily" and this handler is never reached.
   // ?direction=te-en  (optional — defaults to te-en)
   fastify.get(
     '/words/daily',
@@ -12,7 +14,7 @@ export default async function wordRoutes(fastify) {
     async (request, reply) => {
       try {
         const direction = request.query.direction ?? 'te-en';
-        const word = await getDailyWord(supabase, direction);  // pass supabase directly
+        const word = await getDailyWord(supabase, direction);
 
         if (!word) {
           return reply.status(404).send({ error: 'No word found' });
@@ -54,6 +56,7 @@ export default async function wordRoutes(fastify) {
   );
 
   // ── GET /words/:id ────────────────────────────────────────────────────────
+  // Registered LAST so it never shadows /words/daily or /words
   fastify.get(
     '/words/:id',
     { preHandler: fastify.authenticate },
