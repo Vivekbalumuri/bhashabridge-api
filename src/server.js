@@ -50,6 +50,9 @@ fastify.register(lessonRoutes,   { prefix: '/lessons' });
 fastify.register(wordRoutes,     { prefix: '/words' });
 fastify.register(progressRoutes, { prefix: '/progress' });
 fastify.register(streakRoutes,   { prefix: '/streak' });
+fastify.register(import('./routes/leaderboard.js'))
+fastify.register(import('./routes/notify.js'))
+fastify.register(import('./routes/admin.js'), { prefix: '/admin' })
 
 // ── Start ─────────────────────────────────────────────────
 try {
