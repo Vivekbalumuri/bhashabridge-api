@@ -58,7 +58,7 @@ export default async function authRoutes(fastify) {
 
     if (profileError) return reply.code(400).send({ error: profileError.message });
 
-    // Ensure streak row exists — covers users who registered before streak fix
+    // Ensure streak row exists
     const { data: existingStreak } = await supabase
       .from('streaks')
       .select('user_id')
@@ -82,10 +82,6 @@ export default async function authRoutes(fastify) {
   });
 
   // ── POST /forgot-password ──────────────────────────────
-  // FIX: redirectTo must match a URL whitelisted in Supabase dashboard.
-  // Go to: Supabase → Authentication → URL Configuration → Redirect URLs
-  // Add:   bhashabridge://reset-password
-  // Without this Supabase silently drops the email.
   fastify.post('/forgot-password', async (request, reply) => {
     const { email } = request.body;
     if (!email) return reply.code(400).send({ error: 'Email is required' });
@@ -94,12 +90,44 @@ export default async function authRoutes(fastify) {
       redirectTo: 'bhashabridge://reset-password'
     });
 
-    // Always return 200 — never reveal whether the email exists
     if (error) fastify.log.warn(`Password reset for ${email}: ${error.message}`);
 
+    // Always 200 — never reveal whether the email exists
     return reply.code(200).send({
       message: 'If an account exists with this email, a reset link has been sent.'
     });
+  });
+
+  // ── POST /reset-password ───────────────────────────────
+  // Called by ResetPasswordScreen after user taps the email link.
+  // The token is the access_token extracted from the deep link fragment.
+  fastify.post('/reset-password', async (request, reply) => {
+    const { token, password } = request.body ?? {};
+
+    if (!token)    return reply.code(400).send({ error: 'token is required' });
+    if (!password) return reply.code(400).send({ error: 'password is required' });
+    if (password.length < 6) return reply.code(422).send({ error: 'Password must be at least 6 characters' });
+
+    // Establish a session using the recovery access token
+    const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
+      access_token:  token,
+      refresh_token: token
+    });
+
+    if (sessionError) {
+      fastify.log.warn(`Reset password session error: ${sessionError.message}`);
+      return reply.code(400).send({ error: 'Reset link has expired or is invalid. Please request a new one.' });
+    }
+
+    // Update the password in the established session
+    const { error: updateError } = await supabase.auth.updateUser({ password });
+
+    if (updateError) {
+      fastify.log.warn(`Reset password update error: ${updateError.message}`);
+      return reply.code(400).send({ error: updateError.message });
+    }
+
+    return reply.code(200).send({ success: true, message: 'Password updated successfully' });
   });
 
   // ── GET /me ────────────────────────────────────────────
@@ -135,7 +163,6 @@ export default async function authRoutes(fastify) {
   });
 
   // ── PATCH /me/fcm-token ────────────────────────────────
-  // Dedicated endpoint for FCM token updates from the Android app
   fastify.patch('/me/fcm-token', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { fcm_token } = request.body ?? {};
     if (!fcm_token || typeof fcm_token !== 'string') {
