@@ -1,22 +1,18 @@
 // src/routes/words.js
-// GET /words/daily   — deterministic daily word based on UTC date + direction
-// GET /words         — all words for a lesson_id
-// GET /words/:id     — single word
-
+import { supabase } from '../db.js';
 import { getDailyWord } from '../services/wordOfDayService.js';
 
 export default async function wordRoutes(fastify) {
 
-  // ── GET /words/daily ────────────────────────────────────────────────────
-  // ?direction=te-en  (optional — falls back to user's stored direction or te-en)
+  // ── GET /words/daily ──────────────────────────────────────────────────────
+  // ?direction=te-en  (optional — defaults to te-en)
   fastify.get(
     '/words/daily',
     { preHandler: fastify.authenticate },
     async (request, reply) => {
       try {
-        // Direction from query param, or fall back to te-en
         const direction = request.query.direction ?? 'te-en';
-        const word = await getDailyWord(fastify.supabase, direction);
+        const word = await getDailyWord(supabase, direction);  // pass supabase directly
 
         if (!word) {
           return reply.status(404).send({ error: 'No word found' });
@@ -30,8 +26,8 @@ export default async function wordRoutes(fastify) {
     }
   );
 
-  // ── GET /words ───────────────────────────────────────────────────────────
-  // ?lesson_id=<uuid>  returns all words for that lesson
+  // ── GET /words ────────────────────────────────────────────────────────────
+  // ?lesson_id=<uuid>
   fastify.get(
     '/words',
     { preHandler: fastify.authenticate },
@@ -42,7 +38,7 @@ export default async function wordRoutes(fastify) {
         return reply.status(400).send({ error: 'lesson_id is required' });
       }
 
-      const { data: words, error } = await fastify.supabase
+      const { data: words, error } = await supabase
         .from('words')
         .select('*')
         .eq('lesson_id', lesson_id)
@@ -57,14 +53,14 @@ export default async function wordRoutes(fastify) {
     }
   );
 
-  // ── GET /words/:id ───────────────────────────────────────────────────────
+  // ── GET /words/:id ────────────────────────────────────────────────────────
   fastify.get(
     '/words/:id',
     { preHandler: fastify.authenticate },
     async (request, reply) => {
       const { id } = request.params;
 
-      const { data: word, error } = await fastify.supabase
+      const { data: word, error } = await supabase
         .from('words')
         .select('*')
         .eq('id', id)

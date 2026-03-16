@@ -1,9 +1,10 @@
 // src/services/leaderService.js
-// Leaderboard logic — weekly XP rankings with current-user rank injection.
+// Leaderboard logic — XP rankings with current-user rank.
+// supabase param is the client imported from db.js (NOT fastify.supabase)
 
 export async function getLeaderboard(supabase, currentUserId, limit = 50) {
 
-  // ── 1. Pull top N users by total_xp from streaks ──────────────────────────
+  // ── 1. Pull top N users by total_xp ───────────────────────────────────────
   const { data: rows, error } = await supabase
     .from('streaks')
     .select(`
@@ -24,14 +25,14 @@ export async function getLeaderboard(supabase, currentUserId, limit = 50) {
 
   // ── 2. Shape into leaderboard entries ─────────────────────────────────────
   const entries = rows
-    .filter(r => r.users)       // skip orphaned streak rows
+    .filter(r => r.users)
     .map((r, index) => ({
-      user_id:        r.users.id,
-      display_name:   r.users.display_name ?? 'Learner',
-      total_xp:       r.total_xp       ?? 0,
-      current_streak: r.current_streak  ?? 0,
-      level:          r.level           ?? 1,
-      rank:           index + 1,
+      user_id:         r.users.id,
+      display_name:    r.users.display_name ?? 'Learner',
+      total_xp:        r.total_xp       ?? 0,
+      current_streak:  r.current_streak  ?? 0,
+      level:           r.level           ?? 1,
+      rank:            index + 1,
       is_current_user: r.users.supabase_uid === currentUserId ||
                        r.users.id           === currentUserId,
     }));
@@ -43,11 +44,11 @@ export async function getLeaderboard(supabase, currentUserId, limit = 50) {
   if (currentInList) {
     currentUserRank = currentInList.rank;
   } else if (currentUserId) {
-    // User isn't in top N — find their actual rank
+    const userXp = await getUserXp(supabase, currentUserId);
     const { count, error: rankErr } = await supabase
       .from('streaks')
       .select('user_id', { count: 'exact', head: true })
-      .gt('total_xp', await getUserXp(supabase, currentUserId));
+      .gt('total_xp', userXp);
 
     if (!rankErr && count != null) {
       currentUserRank = count + 1;
@@ -57,12 +58,21 @@ export async function getLeaderboard(supabase, currentUserId, limit = 50) {
   return { entries, currentUserRank };
 }
 
-// Helper — get a single user's total_xp
 async function getUserXp(supabase, userId) {
+  // Try matching by supabase_uid first, fall back to users.id
+  const { data: userRow } = await supabase
+    .from('users')
+    .select('id')
+    .eq('supabase_uid', userId)
+    .single();
+
+  const internalId = userRow?.id ?? userId;
+
   const { data } = await supabase
     .from('streaks')
     .select('total_xp')
-    .or(`user_id.eq.${userId}`)
+    .eq('user_id', internalId)
     .single();
+
   return data?.total_xp ?? 0;
 }

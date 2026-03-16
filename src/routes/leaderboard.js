@@ -1,6 +1,5 @@
 // src/routes/leaderboard.js
-// GET /leaderboard  — returns top 50 users by XP with current user's rank
-
+import { supabase } from '../db.js';
 import { getLeaderboard } from '../services/leaderService.js';
 
 export default async function leaderboardRoutes(fastify) {
@@ -13,7 +12,7 @@ export default async function leaderboardRoutes(fastify) {
         const currentUserId = request.user?.sub ?? request.user?.id ?? null;
         const limit = Math.min(parseInt(request.query.limit ?? '50'), 100);
 
-        const result = await getLeaderboard(fastify.supabase, currentUserId, limit);
+        const result = await getLeaderboard(supabase, currentUserId, limit);  // pass supabase directly
         return reply.send(result);
 
       } catch (err) {
