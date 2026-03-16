@@ -5,8 +5,10 @@ import { getDailyWord } from '../services/wordOfDayService.js';
 export default async function wordRoutes(fastify) {
 
   // ── GET /words/daily ──────────────────────────────────────────────────────
-  // MUST be registered before /words/:id — otherwise Fastify's :id wildcard
-  // captures the literal string "daily" and this handler is never reached.
+  // CRITICAL: this route MUST be registered before /words/:id.
+  // Fastify matches routes in registration order. If /words/:id comes first,
+  // the literal string "daily" is captured as the :id param and this handler
+  // is never reached — causing a 404 because no word with id="daily" exists.
   // ?direction=te-en  (optional — defaults to te-en)
   fastify.get(
     '/words/daily',
