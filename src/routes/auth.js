@@ -6,10 +6,7 @@ export default async function authRoutes(fastify) {
   fastify.post('/register', async (request, reply) => {
     const { email, password, nativeLang, learningLangs, displayName } = request.body;
 
-    const { data: authData, error: signUpError } = await supabase.auth.signUp({
-      email,
-      password
-    });
+    const { data: authData, error: signUpError } = await supabase.auth.signUp({ email, password });
 
     if (signUpError) return reply.code(400).send({ error: signUpError.message });
     if (!authData.user) return reply.code(400).send({ error: 'User creation failed' });
@@ -28,26 +25,13 @@ export default async function authRoutes(fastify) {
 
     if (userError) return reply.code(400).send({ error: userError.message });
 
-    // FIX #3: was using insert() which fails silently if row already exists
-    // (e.g. user re-registers after deleting account, or race condition).
-    // upsert() ensures streak row always exists after register — no silent failures.
     const { error: streakError } = await supabase
       .from('streaks')
       .upsert(
-        {
-          user_id:            profile.id,
-          current_streak:     0,
-          longest_streak:     0,
-          total_xp:           0,
-          level:              1,
-          last_activity_date: null,
-        },
+        { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity_date: null },
         { onConflict: 'user_id' }
       );
 
-    // FIX #3: was returning 400 if streak insert failed, blocking registration.
-    // Streak row failure should never block a user from registering —
-    // streak.js GET / will auto-create the row on first fetch if missing.
     if (streakError) {
       fastify.log.warn(`Streak row creation failed for user ${profile.id}: ${streakError.message}`);
     }
@@ -63,11 +47,7 @@ export default async function authRoutes(fastify) {
   fastify.post('/login', async (request, reply) => {
     const { email, password } = request.body;
 
-    const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
-      email,
-      password
-    });
-
+    const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
     if (signInError) return reply.code(401).send({ error: signInError.message });
 
     const { data: profile, error: profileError } = await supabase
@@ -78,8 +58,7 @@ export default async function authRoutes(fastify) {
 
     if (profileError) return reply.code(400).send({ error: profileError.message });
 
-    // Ensure streak row exists on login too — covers users who registered
-    // before this fix was deployed
+    // Ensure streak row exists — covers users who registered before streak fix
     const { data: existingStreak } = await supabase
       .from('streaks')
       .select('user_id')
@@ -90,14 +69,7 @@ export default async function authRoutes(fastify) {
       await supabase
         .from('streaks')
         .upsert(
-          {
-            user_id:            profile.id,
-            current_streak:     0,
-            longest_streak:     0,
-            total_xp:           0,
-            level:              1,
-            last_activity_date: null,
-          },
+          { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity_date: null },
           { onConflict: 'user_id' }
         );
     }
@@ -110,15 +82,19 @@ export default async function authRoutes(fastify) {
   });
 
   // ── POST /forgot-password ──────────────────────────────
+  // FIX: redirectTo must match a URL whitelisted in Supabase dashboard.
+  // Go to: Supabase → Authentication → URL Configuration → Redirect URLs
+  // Add:   bhashabridge://reset-password
+  // Without this Supabase silently drops the email.
   fastify.post('/forgot-password', async (request, reply) => {
     const { email } = request.body;
-
     if (!email) return reply.code(400).send({ error: 'Email is required' });
 
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo: 'bhashabridge://reset-password'
     });
 
+    // Always return 200 — never reveal whether the email exists
     if (error) fastify.log.warn(`Password reset for ${email}: ${error.message}`);
 
     return reply.code(200).send({
@@ -158,6 +134,23 @@ export default async function authRoutes(fastify) {
     return { user: profile };
   });
 
+  // ── PATCH /me/fcm-token ────────────────────────────────
+  // Dedicated endpoint for FCM token updates from the Android app
+  fastify.patch('/me/fcm-token', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    const { fcm_token } = request.body ?? {};
+    if (!fcm_token || typeof fcm_token !== 'string') {
+      return reply.code(400).send({ error: 'fcm_token is required' });
+    }
+
+    const { error } = await supabase
+      .from('users')
+      .update({ fcm_token })
+      .eq('supabase_uid', request.user.id);
+
+    if (error) return reply.code(400).send({ error: error.message });
+    return { success: true };
+  });
+
   // ── DELETE /me ─────────────────────────────────────────
   fastify.delete('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const uid = request.user.id;
@@ -171,14 +164,14 @@ export default async function authRoutes(fastify) {
       .eq('supabase_uid', uid);
 
     if (dbError) return reply.code(400).send({ error: dbError.message });
-
     return { success: true };
   });
 
-  // ── POST /auth/refresh ─────────────────────────────────
+  // ── POST /refresh ──────────────────────────────────────
   fastify.post('/refresh', async (request, reply) => {
     const { refresh_token } = request.body;
     if (!refresh_token) return reply.code(400).send({ error: 'refresh_token required' });
+
     try {
       const { data, error } = await supabase.auth.refreshSession({ refresh_token });
       if (error || !data.session) return reply.code(401).send({ error: 'Invalid or expired refresh token' });
