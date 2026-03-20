@@ -52,6 +52,7 @@ fastify.register(progressRoutes, { prefix: '/progress' });
 fastify.register(streakRoutes,   { prefix: '/streak' });
 fastify.register(import('./routes/leaderboard.js'))
 fastify.register(import('./routes/notify.js'))
+fastify.register(import('./routes/referral.js'), { prefix: '/referral' })
 
 
 // ── Start ─────────────────────────────────────────────────
