@@ -6,13 +6,14 @@ function getLangText(word, langCode) {
     case 'te': return { text: word.telugu     || '', translit: word.translit_telugu     || null };
     case 'ta': return { text: word.tamil      || '', translit: word.translit_tamil      || null };
     case 'ml': return { text: word.malayalam  || '', translit: word.translit_malayalam  || null };
+    case 'kn': return { text: word.kannada    || '', translit: word.translit_kannada    || null };
     default:   return { text: word.english    || '', translit: null };
   }
 }
 
 // Helper: pick the "also" (third bonus) language — not source, not target
 function getAlsoLang(sourceLang, targetLang) {
-  const all = ['te', 'ta', 'ml', 'en'];
+  const all = ['te', 'ta', 'ml', 'kn', 'en'];
   return all.find(l => l !== sourceLang && l !== targetLang) || 'en';
 }
 
@@ -27,14 +28,12 @@ function dedupWords(words) {
 }
 
 // Helper: assign quiz type based on question index
-// Rotates through types so a 10-word lesson gets variety
 function getQuizType(index) {
   const types = ['mcq', 'mcq', 'true_false', 'mcq', 'fill_blank', 'mcq', 'true_false', 'tap_correct', 'mcq', 'fill_blank'];
   return types[index % types.length];
 }
 
 // Helper: build options for true_false
-// Single option — correct=true means the shown translation IS correct
 function buildTrueFalseOptions(word, otherWords, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
@@ -45,7 +44,6 @@ function buildTrueFalseOptions(word, otherWords, targetLang) {
 }
 
 // Helper: build options for tap_correct
-// 6 chips — 1 correct, 5 wrong
 function buildTapCorrectOptions(word, otherWords, targetLang) {
   const correctOption = { id: word.id + '_correct', text: getLangText(word, targetLang).text, correct: true };
   const wrongPool = otherWords
@@ -100,9 +98,9 @@ export default async function lessonRoutes(fastify) {
     const words = dedupWords(rawWords || []);
     if (words.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    const direction  = lesson.direction || 'te-en';
+    const direction              = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
-    const alsoLang   = getAlsoLang(sourceLang, targetLang);
+    const alsoLang               = getAlsoLang(sourceLang, targetLang);
 
     const flashcards = words.map((word, index) => {
       const front = getLangText(word, sourceLang);
@@ -151,7 +149,7 @@ export default async function lessonRoutes(fastify) {
     const words = dedupWords(rawWords || []);
     if (words.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    const direction  = lesson.direction || 'te-en';
+    const direction              = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
 
     const questions = words.map((word, index) => {
@@ -171,7 +169,6 @@ export default async function lessonRoutes(fastify) {
           break;
 
         case 'fill_blank':
-          // Only the correct answer needed — Android handles the text input
           options = [{
             id:      word.id + '_correct',
             text:    getLangText(word, targetLang).text,
@@ -179,9 +176,9 @@ export default async function lessonRoutes(fastify) {
           }];
           break;
 
-        default: // mcq — 4 options, 1 correct
-          const shuffled     = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
-          const wrongOptions = shuffled.map(w => ({
+        default: { // mcq — 4 options, 1 correct
+          const shuffled      = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
+          const wrongOptions  = shuffled.map(w => ({
             id:      w.id + '_wrong',
             text:    getLangText(w, targetLang).text,
             correct: false,
@@ -195,12 +192,13 @@ export default async function lessonRoutes(fastify) {
           options = [...wrongOptions];
           options.splice(insertAt, 0, correctOption);
           break;
+        }
       }
 
       return {
         index,
         word_id: word.id,
-        type,        // ← FIX: Android QuizQuestionDispatcher reads this field
+        type,
         question: {
           text:            questionSide.text,
           translit:        questionSide.translit,
