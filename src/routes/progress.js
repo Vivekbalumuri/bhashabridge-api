@@ -5,17 +5,14 @@ export default async function progressRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
   // ─── GET /progress/summary?direction=te-en ─────────────────────────────────
-  // Must be registered BEFORE /:lessonId to avoid route conflict
   fastify.get('/summary', async (request, reply) => {
     const { direction } = request.query;
     const userId = request.user.id;
 
-    // Total lessons for this direction
     let lessonsQuery = supabase.from('lessons').select('id', { count: 'exact', head: true });
     if (direction) lessonsQuery = lessonsQuery.eq('direction', direction);
     const { count: totalLessons } = await lessonsQuery;
 
-    // Completed lessons (quiz_completed = true)
     let progressQuery = supabase
       .from('lesson_progress')
       .select('quiz_score, quiz_completed', { count: 'exact' })
@@ -24,7 +21,6 @@ export default async function progressRoutes(fastify) {
     if (direction) progressQuery = progressQuery.eq('direction', direction);
     const { data: completedRows, count: completed } = await progressQuery;
 
-    // Words learned = sum of actual word counts from completed lessons
     let wordsQuery = supabase
       .from('lesson_progress')
       .select('lesson_id, quiz_score, quiz_total, lessons(word_count)', { count: 'exact' })
@@ -37,7 +33,6 @@ export default async function progressRoutes(fastify) {
       return sum + (r.lessons?.word_count || 10);
     }, 0);
 
-    // Accuracy = average of (score/total)*100 per lesson
     const accuracyScores = (completedData || [])
       .filter(r => r.quiz_total > 0)
       .map(r => Math.round((r.quiz_score / r.quiz_total) * 100));
@@ -45,7 +40,6 @@ export default async function progressRoutes(fastify) {
       ? Math.round(accuracyScores.reduce((a, b) => a + b, 0) / accuracyScores.length)
       : 0;
 
-    // XP from streak table
     let xp = 0;
     try {
       const { data: userRow } = await supabase.from('users').select('id').eq('supabase_uid', userId).single();
@@ -79,8 +73,12 @@ export default async function progressRoutes(fastify) {
       .order('module_order', { ascending: true });
 
     if (lessonsError) return reply.code(400).send({ error: lessonsError.message });
-    if (!lessons || lessons.length === 0)
-      return reply.code(404).send({ error: 'No lessons found for this direction' });
+
+    // ── FIX: return empty list instead of 404 when no lessons yet ─────────────
+    // This prevents the app from showing a server error on new directions
+    if (!lessons || lessons.length === 0) {
+      return { direction, lessons: [] };
+    }
 
     const { data: progressRows } = await supabase
       .from('lesson_progress')
@@ -168,7 +166,6 @@ export default async function progressRoutes(fastify) {
 
     const userId = request.user.id;
 
-    // ── 1. Upsert lesson progress ───────────────────────────────────────────
     const { data: existingQuiz } = await supabase
       .from('lesson_progress')
       .select('id')
@@ -209,7 +206,6 @@ export default async function progressRoutes(fastify) {
 
     if (progressError) return reply.code(400).send({ error: progressError.message });
 
-    // ── 2. Unlock next lesson ───────────────────────────────────────────────
     const { data: currentLesson } = await supabase
       .from('lessons')
       .select('module_order')
@@ -255,9 +251,6 @@ export default async function progressRoutes(fastify) {
       }
     }
 
-    // ── 3. Update streak via streakService (fixes silent failure bug) ───────
-    // OLD code used update() which silently skipped users with no streak row.
-    // streakService uses upsert() so it works for ALL users including new ones.
     try {
       const { data: userProfile } = await supabase
         .from('users')
@@ -269,9 +262,8 @@ export default async function progressRoutes(fastify) {
         const xpGained = Math.max(5, Math.round((score / (total || 1)) * 50));
         await recordActivity(userProfile.id, xpGained);
       }
-    } catch (_) { /* streak update is non-critical, never block the response */ }
+    } catch (_) {}
 
-    // ── 4. Return result ────────────────────────────────────────────────────
     return {
       success:              true,
       message:              'Quiz completed',
