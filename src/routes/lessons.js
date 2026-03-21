@@ -112,8 +112,11 @@ export default async function lessonRoutes(fastify) {
       .from('words').select('*').eq('lesson_id', id).order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    const words = dedupWords(rawWords || []);
-    if (words.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
+    const allWords = dedupWords(rawWords || []);
+    if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
+
+    // Shuffle and limit to 10 words per session
+    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
@@ -183,8 +186,11 @@ export default async function lessonRoutes(fastify) {
       .from('words').select('*').eq('lesson_id', id).order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    const words = dedupWords(rawWords || []);
-    if (words.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
+    const allWords = dedupWords(rawWords || []);
+    if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
+
+    // Shuffle and limit to 10 questions per session
+    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
