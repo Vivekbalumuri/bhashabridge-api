@@ -10,24 +10,12 @@ function getLangText(word, langCode) {
   }
 }
 
-// Gate: free users see Roman transliteration instead of native script.
-// Falls back to script if no translit. Falls back to english if both empty.
-function applyScriptGate(langData, langCode, isPremium, word) {
-  if (isPremium) {
-    // Premium: show script, but fall back to english if script empty
-    if (!langData.text && langCode !== 'en') {
-      return { text: word.english || '', translit: langData.translit };
-    }
-    return langData;
-  }
-  if (langCode === 'en') return langData;
-  // Free user with non-English script
-  if (langData.translit) {
-    return { text: langData.translit, translit: langData.translit };
-  }
-  // No translit available — show script if exists, else english
+// No script gate — everyone sees native script.
+// Falls back to english if script is empty (alphabet lessons).
+function resolveText(langData, langCode, word) {
   if (langData.text) return langData;
-  return { text: word.english || '', translit: null };
+  if (langCode === 'en') return langData;
+  return { text: word.english || '', translit: langData.translit };
 }
 
 function getAlsoLang(sourceLang, targetLang) {
@@ -44,32 +32,35 @@ function dedupWords(words) {
   });
 }
 
-// Free users only get MCQ — premium get all types
+// Free users get MCQ only.
+// Premium users get MCQ + TrueFalse + TapCorrect.
+// FillBlank removed entirely.
 function getQuizType(index, isPremium) {
   if (!isPremium) return 'mcq';
-  const types = ['mcq', 'mcq', 'true_false', 'mcq', 'fill_blank', 'mcq', 'true_false', 'tap_correct', 'mcq', 'fill_blank'];
+  const types = ['mcq', 'mcq', 'true_false', 'mcq', 'tap_correct',
+                 'mcq', 'true_false', 'tap_correct', 'mcq', 'mcq'];
   return types[index % types.length];
 }
 
-function buildTrueFalseOptions(word, otherWords, targetLang, isPremium) {
+function buildTrueFalseOptions(word, otherWords, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
-    const ld = applyScriptGate(getLangText(word, targetLang), targetLang, isPremium, word);
+    const ld = resolveText(getLangText(word, targetLang), targetLang, word);
     return [{ id: word.id + '_tf', text: ld.text, correct: true }];
   }
   const wrong = otherWords[Math.floor(Math.random() * otherWords.length)];
-  const ld = applyScriptGate(getLangText(wrong || word, targetLang), targetLang, isPremium, wrong || word);
+  const ld = resolveText(getLangText(wrong || word, targetLang), targetLang, wrong || word);
   return [{ id: (wrong?.id || word.id) + '_tf', text: ld.text, correct: false }];
 }
 
-function buildTapCorrectOptions(word, otherWords, targetLang, isPremium) {
-  const correctLd = applyScriptGate(getLangText(word, targetLang), targetLang, isPremium, word);
+function buildTapCorrectOptions(word, otherWords, targetLang) {
+  const correctLd = resolveText(getLangText(word, targetLang), targetLang, word);
   const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
   const wrongPool = otherWords
     .sort(() => Math.random() - 0.5)
     .slice(0, 5)
     .map(w => {
-      const ld = applyScriptGate(getLangText(w, targetLang), targetLang, isPremium, w);
+      const ld = resolveText(getLangText(w, targetLang), targetLang, w);
       return { id: w.id + '_wrong', text: ld.text, correct: false };
     });
   const options = [...wrongPool];
@@ -93,6 +84,7 @@ async function getUserIsPremium(supabaseUid) {
 export default async function lessonRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
+  // GET /lessons?direction=
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
     let query = supabase
@@ -105,6 +97,7 @@ export default async function lessonRoutes(fastify) {
     return { lessons: lessons || [] };
   });
 
+  // GET /lessons/:id/learn
   fastify.get('/:id/learn', async (request, reply) => {
     const { id } = request.params;
     const [lessonResult, isPremium] = await Promise.all([
@@ -130,23 +123,52 @@ export default async function lessonRoutes(fastify) {
       const rawFront = getLangText(word, sourceLang);
       const rawBack  = getLangText(word, targetLang);
       const rawAlso  = getLangText(word, alsoLang);
-      const front = applyScriptGate(rawFront, sourceLang, isPremium, word);
-      const back  = applyScriptGate(rawBack,  targetLang, isPremium, word);
-      const also  = applyScriptGate(rawAlso,  alsoLang,   isPremium, word);
+
+      // Always show native script — fallback to english if empty
+      const front = resolveText(rawFront, sourceLang, word);
+      const back  = resolveText(rawBack,  targetLang, word);
+      const also  = resolveText(rawAlso,  alsoLang,   word);
+
       return {
         index,
         word_id: word.id,
-        front: { text: front.text, translit: rawFront.translit, lang: sourceLang, audio_text: rawFront.text || word.english, audio_lang_code: sourceLang },
-        back:  { text: back.text,  translit: rawBack.translit,  lang: targetLang, audio_text: rawBack.text  || word.english, audio_lang_code: targetLang },
-        also:  { text: also.text,  translit: rawAlso.translit,  lang: alsoLang,   audio_text: rawAlso.text  || word.english, audio_lang_code: alsoLang },
+        front: {
+          text:            front.text,
+          translit:        rawFront.translit,   // always included as helper
+          lang:            sourceLang,
+          audio_text:      rawFront.text || word.english,
+          audio_lang_code: sourceLang,
+        },
+        back: {
+          text:            back.text,
+          translit:        rawBack.translit,
+          lang:            targetLang,
+          audio_text:      rawBack.text || word.english,
+          audio_lang_code: targetLang,
+        },
+        also: {
+          text:            also.text,
+          translit:        rawAlso.translit,
+          lang:            alsoLang,
+          audio_text:      rawAlso.text || word.english,
+          audio_lang_code: alsoLang,
+        },
         dravidian_note: word.dravidian_note || null,
-        script_locked: !isPremium,
       };
     });
 
-    return { lesson, phase: 'learn', base_lang: targetLang, learn_lang: sourceLang, total_cards: flashcards.length, flashcards, is_premium_user: isPremium };
+    return {
+      lesson,
+      phase:       'learn',
+      base_lang:   targetLang,
+      learn_lang:  sourceLang,
+      total_cards: flashcards.length,
+      flashcards,
+      is_premium_user: isPremium,
+    };
   });
 
+  // GET /lessons/:id/quiz
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
     const [lessonResult, isPremium] = await Promise.all([
@@ -168,31 +190,26 @@ export default async function lessonRoutes(fastify) {
     const [sourceLang, targetLang] = direction.split('-');
 
     const questions = words.map((word, index) => {
-      const rawQuestion   = getLangText(word, sourceLang);
-      const gatedQuestion = applyScriptGate(rawQuestion, sourceLang, isPremium, word);
-      const otherWords    = words.filter(w => w.id !== word.id);
-      const type          = getQuizType(index, isPremium);
+      const rawQuestion = getLangText(word, sourceLang);
+      const question    = resolveText(rawQuestion, sourceLang, word);
+      const otherWords  = words.filter(w => w.id !== word.id);
+      const type        = getQuizType(index, isPremium);
 
       let options;
       switch (type) {
         case 'true_false':
-          options = buildTrueFalseOptions(word, otherWords, targetLang, isPremium);
+          options = buildTrueFalseOptions(word, otherWords, targetLang);
           break;
         case 'tap_correct':
-          options = buildTapCorrectOptions(word, otherWords, targetLang, isPremium);
+          options = buildTapCorrectOptions(word, otherWords, targetLang);
           break;
-        case 'fill_blank': {
-          const ld = applyScriptGate(getLangText(word, targetLang), targetLang, isPremium, word);
-          options = [{ id: word.id + '_correct', text: ld.text, correct: true }];
-          break;
-        }
-        default: {
+        default: { // mcq
           const shuffled = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
           const wrongOptions = shuffled.map(w => {
-            const ld = applyScriptGate(getLangText(w, targetLang), targetLang, isPremium, w);
+            const ld = resolveText(getLangText(w, targetLang), targetLang, w);
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
-          const correctLd = applyScriptGate(getLangText(word, targetLang), targetLang, isPremium, word);
+          const correctLd = resolveText(getLangText(word, targetLang), targetLang, word);
           const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
           const insertAt = Math.floor(Math.random() * 4);
           options = [...wrongOptions];
@@ -202,10 +219,12 @@ export default async function lessonRoutes(fastify) {
       }
 
       return {
-        index, word_id: word.id, type,
+        index,
+        word_id: word.id,
+        type,
         question: {
-          text:            gatedQuestion.text,
-          translit:        rawQuestion.translit,
+          text:            question.text,
+          translit:        rawQuestion.translit,  // always included as helper
           lang:            sourceLang,
           audio_text:      rawQuestion.text || word.english,
           audio_lang_code: sourceLang,
@@ -214,6 +233,14 @@ export default async function lessonRoutes(fastify) {
       };
     });
 
-    return { lesson, phase: 'quiz', base_lang: targetLang, learn_lang: sourceLang, total_questions: questions.length, questions, is_premium_user: isPremium };
+    return {
+      lesson,
+      phase:           'quiz',
+      base_lang:       targetLang,
+      learn_lang:      sourceLang,
+      total_questions: questions.length,
+      questions,
+      is_premium_user: isPremium,
+    };
   });
 }
