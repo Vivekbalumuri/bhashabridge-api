@@ -139,7 +139,26 @@ export default async function authRoutes(fastify) {
       .single();
 
     if (error) return reply.code(400).send({ error: error.message });
-    return profile;
+
+    // Auto-expire premium if past expiry date
+    let isPremium = profile.is_premium;
+    if (isPremium && profile.premium_expires_at) {
+      const expired = new Date(profile.premium_expires_at) < new Date();
+      if (expired) {
+        isPremium = false;
+        // Write back so the DB stays consistent
+        await supabase
+          .from('users')
+          .update({ is_premium: false })
+          .eq('id', profile.id);
+      }
+    }
+
+    return {
+      ...profile,
+      is_premium:          isPremium,
+      premium_expires_at:  profile.premium_expires_at ?? null,
+    };
   });
 
   // ── PATCH /me ──────────────────────────────────────────
