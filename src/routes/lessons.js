@@ -115,8 +115,13 @@ export default async function lessonRoutes(fastify) {
     const allWords = dedupWords(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Shuffle and limit to 10 words per session
-    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 10);
+    // Alphabet/phonics lessons (module_order 1-18): preserve sort_order so
+    // characters are presented in correct script sequence during learn phase.
+    // Vocabulary lessons: shuffle for variety.
+    const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
+    const words = isScriptLesson
+      ? allWords.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).slice(0, 10)
+      : allWords.sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
@@ -241,6 +246,111 @@ export default async function lessonRoutes(fastify) {
 
     return {
       lesson,
+      phase:           'quiz',
+      base_lang:       targetLang,
+      learn_lang:      sourceLang,
+      total_questions: questions.length,
+      questions,
+      is_premium_user: isPremium,
+    };
+  });
+
+  // GET /lessons/final-exam/:direction
+  // 15 random questions from ALL alphabet+phonics words (module_order 1-18).
+  // Available to free and premium users alike.
+  fastify.get('/final-exam/:direction', async (request, reply) => {
+    const { direction } = request.params;
+    const isPremium = await getUserIsPremium(request.user.id);
+
+    // Step 1: get lesson IDs for module_order 1-18 in this direction
+    const { data: lessonRows, error: lessonError } = await supabase
+      .from('lessons')
+      .select('id')
+      .eq('direction', direction)
+      .gte('module_order', 1)
+      .lte('module_order', 18);
+
+    if (lessonError) return reply.code(400).send({ error: lessonError.message });
+    if (!lessonRows?.length) {
+      return reply.code(404).send({ error: 'No alphabet lessons found for this direction' });
+    }
+
+    const lessonIds = lessonRows.map(l => l.id);
+
+    // Step 2: fetch all words belonging to those lessons
+    const { data: rawWords, error } = await supabase
+      .from('words')
+      .select(`
+        id, english, telugu, tamil, malayalam, kannada,
+        translit_telugu, translit_tamil, translit_malayalam, translit_kannada,
+        dravidian_note, sort_order
+      `)
+      .in('lesson_id', lessonIds);
+
+    if (error) return reply.code(400).send({ error: error.message });
+
+    const allWords = dedupWords(rawWords || []);
+    if (allWords.length === 0) {
+      return reply.code(404).send({ error: 'No alphabet words found for this direction' });
+    }
+
+    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 15);
+    const [sourceLang, targetLang] = direction.split('-');
+
+    const questions = words.map((word, index) => {
+      const rawQuestion = getLangText(word, sourceLang);
+      const question    = resolveText(rawQuestion, sourceLang, word);
+      const otherWords  = words.filter(w => w.id !== word.id);
+      const type        = getQuizType(index, isPremium);
+
+      let options;
+      switch (type) {
+        case 'true_false':
+          options = buildTrueFalseOptions(word, otherWords, targetLang);
+          break;
+        case 'tap_correct':
+          options = buildTapCorrectOptions(word, otherWords, targetLang);
+          break;
+        default: {
+          const shuffled = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
+          const wrongOptions = shuffled.map(w => {
+            const ld = resolveText(getLangText(w, targetLang), targetLang, w);
+            return { id: w.id + '_wrong', text: ld.text, correct: false };
+          });
+          const correctLd    = resolveText(getLangText(word, targetLang), targetLang, word);
+          const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
+          options = [...wrongOptions];
+          options.splice(Math.floor(Math.random() * 4), 0, correctOption);
+          break;
+        }
+      }
+
+      return {
+        index,
+        word_id: word.id,
+        type,
+        question: {
+          text:            question.text,
+          translit:        rawQuestion.translit,
+          lang:            sourceLang,
+          audio_text:      rawQuestion.text || word.english,
+          audio_lang_code: sourceLang,
+        },
+        options,
+      };
+    });
+
+    return {
+      lesson: {
+        id:           `final-exam-${direction}`,
+        title:        'Final Exam',
+        description:  'Test everything you have learned — all alphabets and phonics',
+        direction,
+        module_order: 19,
+        skill_type:   'final_exam',
+        is_premium:   false,
+        word_count:   questions.length,
+      },
       phase:           'quiz',
       base_lang:       targetLang,
       learn_lang:      sourceLang,

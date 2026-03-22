@@ -130,6 +130,57 @@ export default async function authRoutes(fastify) {
     return reply.code(200).send({ success: true, message: 'Password updated successfully' });
   });
 
+  // ── POST /auth/google ──────────────────────────────────
+  // Receives Firebase ID token from Android, verifies with Supabase,
+  // creates/fetches user profile, returns same shape as /login
+  fastify.post('/google', async (request, reply) => {
+    const { id_token } = request.body ?? {};
+    if (!id_token) return reply.code(400).send({ error: 'id_token is required' });
+
+    // Exchange Firebase ID token for a Supabase session
+    const { data: authData, error: authError } = await supabase.auth.signInWithIdToken({
+      provider: 'google',
+      token: id_token,
+    });
+
+    if (authError || !authData?.user) {
+      fastify.log.warn(`Google sign-in failed: ${authError?.message}`);
+      return reply.code(401).send({ error: authError?.message ?? 'Google sign-in failed' });
+    }
+
+    const supabaseUid = authData.user.id;
+
+    // Upsert user profile — create on first Google login, fetch on subsequent
+    const { data: profile, error: upsertError } = await supabase
+      .from('users')
+      .upsert({
+        supabase_uid: supabaseUid,
+        email:        authData.user.email,
+        display_name: authData.user.user_metadata?.full_name
+                   ?? authData.user.user_metadata?.name
+                   ?? authData.user.email?.split('@')[0],
+      }, { onConflict: 'supabase_uid' })
+      .select()
+      .single();
+
+    if (upsertError) return reply.code(400).send({ error: upsertError.message });
+
+    // Ensure streak row exists
+    await supabase
+      .from('streaks')
+      .upsert(
+        { user_id: profile.id, current_streak: 0, longest_streak: 0,
+          total_xp: 0, level: 1, last_activity_date: null },
+        { onConflict: 'user_id' }
+      );
+
+    return reply.send({
+      token:         authData.session?.access_token,
+      refresh_token: authData.session?.refresh_token,
+      user:          profile,
+    });
+  });
+
   // ── GET /me ────────────────────────────────────────────
   fastify.get('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { data: profile, error } = await supabase

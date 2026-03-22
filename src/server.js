@@ -7,8 +7,12 @@ import lessonRoutes   from './routes/lessons.js';
 import wordRoutes     from './routes/words.js';
 import progressRoutes from './routes/progress.js';
 import streakRoutes   from './routes/streak.js';
+import { registerJobs } from './jobs/index.js';
 
 const fastify = Fastify({ logger: true });
+
+// Make supabase accessible in all route handlers via fastify.supabase
+fastify.decorate('supabase', supabase);
 
 // ── CORS ──────────────────────────────────────────────────
 await fastify.register(cors, { origin: true });
@@ -61,6 +65,8 @@ try {
     port: process.env.PORT || 3000,
     host: '0.0.0.0'
   });
+  // Start background jobs after server is up
+  registerJobs(fastify);
 } catch (err) {
   fastify.log.error(err);
   process.exit(1);
