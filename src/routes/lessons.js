@@ -120,7 +120,7 @@ export default async function lessonRoutes(fastify) {
     // Vocabulary lessons: shuffle for variety.
     const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
     const words = isScriptLesson
-      ? allWords.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)).slice(0, 10)
+      ? [...allWords].sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999)).slice(0, 10)
       : allWords.sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
