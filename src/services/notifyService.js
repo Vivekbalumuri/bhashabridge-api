@@ -21,8 +21,6 @@ function ensureFirebase() {
 }
 
 // ── Greeting word by target language ─────────────────────────────────────────
-// direction format: "source-target" e.g. "en-te", "ta-en"
-// The language the user is LEARNING is the second part of the direction.
 const GREETINGS = {
   te: 'నమస్కారం',
   ta: 'வணக்கம்',
@@ -40,7 +38,7 @@ function getGreeting(direction = 'te-en') {
 const ANDROID_CONFIG = {
   notification: {
     icon:      'ic_notification',
-    color:     '#E8621A',       // BhashaBridge Saffron
+    color:     '#E8621A',
     channelId: 'daily_reminder',
     priority:  'high',
   },
@@ -63,8 +61,6 @@ export async function sendPushNotification({ token, title, body, data = {} }) {
 }
 
 // ── Send daily reminders to all users with an FCM token ───────────────────────
-// Uses each user's native_lang to pick the localised greeting.
-// Falls back to Telugu greeting if native_lang is missing.
 export async function sendDailyReminders(supabase) {
   const { data: users, error } = await supabase
     .from('users')
@@ -82,7 +78,6 @@ export async function sendDailyReminders(supabase) {
 
   ensureFirebase();
 
-  // FCM sendEach handles up to 500 messages per call
   const chunks = chunkArray(messages, 500);
   let sent = 0, failed = 0;
 
@@ -91,7 +86,6 @@ export async function sendDailyReminders(supabase) {
     sent   += response.successCount;
     failed += response.failureCount;
 
-    // Clean up invalid/unregistered tokens from the DB
     const invalidTokens = response.responses
       .map((r, i) => ({ r, msg: chunk[i] }))
       .filter(({ r }) =>
@@ -115,8 +109,6 @@ export async function sendDailyReminders(supabase) {
 }
 
 // ── Send story-unlocked notification to a single user ────────────────────────
-// Called after a free user upgrades to premium AND has already completed
-// the Greetings lesson (checked server-side in progress.js or paywall handler).
 export async function sendStoryUnlockedNotification({ fcmToken, displayName, storyTitle = "Ravi's First Day" }) {
   if (!fcmToken) return;
   const firstName = displayName?.split(' ')[0] ?? 'Learner';
@@ -128,18 +120,78 @@ export async function sendStoryUnlockedNotification({ fcmToken, displayName, sto
   });
 }
 
-// ── Build FCM message objects for all users ───────────────────────────────────
+// ── Streak-lost reminders ─────────────────────────────────────────────────────
+// Runs at 03:30 UTC (09:00 IST) — finds users whose streak broke overnight.
+// last_activity = yesterday → they were active yesterday but missed today.
+export async function sendStreakLostReminders(supabase) {
+  const today     = new Date().toISOString().split('T')[0]
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().split('T')[0]
+
+  const { data: streaks, error } = await supabase
+    .from('streaks')
+    .select(`
+      user_id,
+      current_streak,
+      last_activity,
+      users (
+        fcm_token,
+        display_name,
+        native_lang
+      )
+    `)
+    .eq('last_activity', yesterday)
+    .not('users.fcm_token', 'is', null)
+
+  if (error) {
+    console.error('[notify] streak-lost fetch error:', error.message)
+    return { sent: 0, failed: 0 }
+  }
+
+  if (!streaks || streaks.length === 0) {
+    console.log('[notify] streak-lost: no broken streaks found')
+    return { sent: 0, failed: 0 }
+  }
+
+  const results = await Promise.allSettled(
+    streaks
+      .filter(s => s.users?.fcm_token)
+      .map(async s => {
+        const name        = (s.users.display_name ?? 'friend').split(' ')[0]
+        const streakCount = s.current_streak > 0 ? s.current_streak : 1
+
+        const result = await sendPushNotification({
+          token: s.users.fcm_token,
+          title: 'Streak gone, but not forgotten. 💔',
+          body:  `Your ${streakCount}-day streak is over, but your progress isn't. Come back stronger, ${name}!`,
+          data:  { screen: 'home', type: 'streak_lost', streak_count: String(streakCount) },
+        })
+
+        // Clear stale token from DB
+        if (result?.error?.code === 'messaging/registration-token-not-registered') {
+          await supabase
+            .from('users')
+            .update({ fcm_token: null })
+            .eq('id', s.user_id)
+        }
+
+        return result
+      })
+  )
+
+  const sent   = results.filter(r => r.status === 'fulfilled').length
+  const failed = results.filter(r => r.status === 'rejected').length
+  console.log(`[notify] streak-lost: sent=${sent} failed=${failed}`)
+  return { sent, failed }
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
 function buildReminderMessages(users) {
   return users
     .filter(u => u.fcm_token)
     .map(u => {
-      // native_lang is the language the user speaks natively.
-      // direction for greeting = native_lang-en as a best-effort default.
-      // e.g. native=te → direction=te-en → greeting=నమస్కారం
       const direction = u.native_lang ? `${u.native_lang}-en` : 'te-en';
       const greeting  = getGreeting(direction);
       const firstName = u.display_name?.split(' ')[0] ?? 'Learner';
-
       return {
         token: u.fcm_token,
         notification: {
@@ -152,7 +204,6 @@ function buildReminderMessages(users) {
     });
 }
 
-// ── Utility: split array into chunks of `size` ────────────────────────────────
 function chunkArray(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) {

@@ -3,7 +3,7 @@
 // Uses node-cron (add to package.json: "node-cron": "^3.0.3")
 
 import cron from 'node-cron';
-import { sendDailyReminders } from '../services/notifyService.js';
+import { sendDailyReminders, sendStreakLostReminders } from '../services/notifyService.js';
 
 export function registerJobs(fastify) {
 
@@ -23,7 +23,7 @@ export function registerJobs(fastify) {
     fastify.log.warn('[jobs] RENDER_EXTERNAL_URL not set — self-ping disabled');
   }
 
-  // ── Daily reminder — 02:30 UTC = 08:00 AM IST every day ───────────────────
+  // ── Daily reminder — 02:30 UTC = 08:00 AM IST ─────────────────────────────
   cron.schedule('30 2 * * *', async () => {
     fastify.log.info('[jobs] Running daily reminder job');
     try {
@@ -32,9 +32,7 @@ export function registerJobs(fastify) {
     } catch (err) {
       fastify.log.error('[jobs] Daily reminder error:', err.message);
     }
-  }, {
-    timezone: 'UTC',
-  });
+  }, { timezone: 'UTC' });
 
   fastify.log.info('[jobs] Daily reminder cron registered (02:30 UTC = 08:00 AM IST)');
 
@@ -48,11 +46,24 @@ export function registerJobs(fastify) {
     } catch (err) {
       fastify.log.error('[jobs] Streak-at-risk error:', err.message);
     }
-  }, {
-    timezone: 'UTC',
-  });
+  }, { timezone: 'UTC' });
 
   fastify.log.info('[jobs] Streak-at-risk cron registered (18:30 UTC = 00:00 midnight IST)');
+
+  // ── Streak-lost — 03:30 UTC = 09:00 AM IST ────────────────────────────────
+  // Fires after midnight IST has passed — notifies users whose streak
+  // just broke because they missed yesterday completely.
+  cron.schedule('30 3 * * *', async () => {
+    fastify.log.info('[jobs] Running streak-lost job');
+    try {
+      const result = await sendStreakLostReminders(fastify.supabase);
+      fastify.log.info(`[jobs] Streak-lost done — ${result.sent} sent, ${result.failed} failed`);
+    } catch (err) {
+      fastify.log.error('[jobs] Streak-lost error:', err.message);
+    }
+  }, { timezone: 'UTC' });
+
+  fastify.log.info('[jobs] Streak-lost cron registered (03:30 UTC = 09:00 AM IST)');
 }
 
 // ── Streak-at-risk sender ─────────────────────────────────────────────────────
