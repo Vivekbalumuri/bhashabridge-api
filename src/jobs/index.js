@@ -1,106 +1,210 @@
-// src/jobs/index.js
-// Background jobs — registered once when the Fastify server starts.
-// Uses node-cron (add to package.json: "node-cron": "^3.0.3")
+/**
+ * src/jobs/index.js
+ *
+ * All background cron jobs for BhashaBridge backend.
+ * Call registerJobs(fastify) once after the server starts listening.
+ *
+ * Schedule summary (all times UTC):
+ *   Every 10 min  — self-ping to keep Render.com warm
+ *   02:30 UTC     — daily reminder push (08:00 AM IST)
+ *   18:30 UTC     — streak-at-risk push (midnight IST)
+ *   03:30 UTC     — streak-lost push    (09:00 AM IST)
+ *   18:30 Sun UTC — weekly league reset (Monday 00:00 IST)
+ */
 
-import cron from 'node-cron';
-import { sendDailyReminders, sendStreakLostReminders } from '../services/notifyService.js';
+'use strict'
 
-export function registerJobs(fastify) {
+const cron = require('node-cron')
+const { scheduleLeagueReset } = require('./leagueReset')
 
-  // ── Self-ping every 14 min — prevents Render free tier cold starts ─────────
-  const SELF_URL = process.env.RENDER_EXTERNAL_URL || process.env.API_BASE_URL;
-  if (SELF_URL) {
-    cron.schedule('*/14 * * * *', async () => {
-      try {
-        await fetch(`${SELF_URL}/health`);
-        fastify.log.info('[jobs] Self-ping OK');
-      } catch (err) {
-        fastify.log.warn('[jobs] Self-ping failed:', err.message);
-      }
-    });
-    fastify.log.info(`[jobs] Self-ping registered — hitting ${SELF_URL}/health every 14 min`);
-  } else {
-    fastify.log.warn('[jobs] RENDER_EXTERNAL_URL not set — self-ping disabled');
-  }
+function registerJobs(fastify) {
 
-  // ── Daily reminder — 02:30 UTC = 08:00 AM IST ─────────────────────────────
+  // ── Self-ping — keeps Render free tier warm ───────────────────────────────
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      const url = process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL
+      if (!url) return
+      await fetch(`${url}/health`).catch(() => {})
+      fastify.log.debug('Self-ping OK')
+    } catch (_) {}
+  })
+
+  // ── Daily reminder — 08:00 AM IST (02:30 UTC) ────────────────────────────
   cron.schedule('30 2 * * *', async () => {
-    fastify.log.info('[jobs] Running daily reminder job');
+    fastify.log.info('Job: daily-reminder')
     try {
-      const result = await sendDailyReminders(fastify.supabase);
-      fastify.log.info(`[jobs] Daily reminders done — ${result.sent} sent, ${result.failed} failed`);
+      await sendDailyReminders(fastify)
     } catch (err) {
-      fastify.log.error('[jobs] Daily reminder error:', err.message);
+      fastify.log.error({ err }, 'daily-reminder job failed')
     }
-  }, { timezone: 'UTC' });
+  }, { timezone: 'UTC' })
 
-  fastify.log.info('[jobs] Daily reminder cron registered (02:30 UTC = 08:00 AM IST)');
-
-  // ── Streak-at-risk — 18:30 UTC = 00:00 midnight IST ───────────────────────
-  // Warns users who haven't done a lesson today before their streak resets
+  // ── Streak-at-risk — midnight IST (18:30 UTC) ─────────────────────────────
   cron.schedule('30 18 * * *', async () => {
-    fastify.log.info('[jobs] Running streak-at-risk job');
+    fastify.log.info('Job: streak-at-risk')
     try {
-      const result = await sendStreakAtRiskReminders(fastify.supabase);
-      fastify.log.info(`[jobs] Streak-at-risk done — ${result.sent} sent, ${result.failed} failed`);
+      await sendStreakAtRisk(fastify)
     } catch (err) {
-      fastify.log.error('[jobs] Streak-at-risk error:', err.message);
+      fastify.log.error({ err }, 'streak-at-risk job failed')
     }
-  }, { timezone: 'UTC' });
+  }, { timezone: 'UTC' })
 
-  fastify.log.info('[jobs] Streak-at-risk cron registered (18:30 UTC = 00:00 midnight IST)');
-
-  // ── Streak-lost — 03:30 UTC = 09:00 AM IST ────────────────────────────────
-  // Fires after midnight IST has passed — notifies users whose streak
-  // just broke because they missed yesterday completely.
+  // ── Streak-lost — 09:00 AM IST (03:30 UTC) ───────────────────────────────
   cron.schedule('30 3 * * *', async () => {
-    fastify.log.info('[jobs] Running streak-lost job');
+    fastify.log.info('Job: streak-lost')
     try {
-      const result = await sendStreakLostReminders(fastify.supabase);
-      fastify.log.info(`[jobs] Streak-lost done — ${result.sent} sent, ${result.failed} failed`);
+      await sendStreakLost(fastify)
     } catch (err) {
-      fastify.log.error('[jobs] Streak-lost error:', err.message);
+      fastify.log.error({ err }, 'streak-lost job failed')
     }
-  }, { timezone: 'UTC' });
+  }, { timezone: 'UTC' })
 
-  fastify.log.info('[jobs] Streak-lost cron registered (03:30 UTC = 09:00 AM IST)');
+  // ── Weekly league reset — Monday 00:00 IST (Sunday 18:30 UTC) ────────────
+  scheduleLeagueReset(fastify)
+
+  fastify.log.info('All background jobs registered')
 }
 
-// ── Streak-at-risk sender ─────────────────────────────────────────────────────
-// Fetches users with an active streak who haven't done a lesson today
-async function sendStreakAtRiskReminders(supabase) {
-  const { sendPushNotification } = await import('./notifyService.js').catch(
-    () => import('../services/notifyService.js')
-  );
+// ── Notification helpers ───────────────────────────────────────────────────────
 
-  const today = new Date().toISOString().split('T')[0];
+async function sendDailyReminders(fastify) {
+  const db = fastify.supabase
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
 
-  const { data: streaks, error } = await supabase
+  // Users who haven't completed a lesson today and have FCM token
+  const { data: users } = await db
+    .from('users')
+    .select('id, display_name, fcm_token')
+    .not('fcm_token', 'is', null)
+
+  if (!users?.length) return
+
+  const todayStr = new Date().toISOString().slice(0, 10)
+  const { data: activeToday } = await db
+    .from('lesson_progress')
+    .select('user_id')
+    .eq('quiz_completed', true)
+    .gte('completed_at', `${todayStr}T00:00:00Z`)
+
+  const activeTodayIds = new Set((activeToday ?? []).map(r => r.user_id))
+  const toNotify = users.filter(u => !activeTodayIds.has(u.id) && u.fcm_token)
+
+  fastify.log.info(`Daily reminder: sending to ${toNotify.length} users`)
+  await sendFcmBatch(fastify, toNotify, {
+    title: '🌟 Time to learn!',
+    body:  'Your daily lesson is waiting. Keep your streak alive!',
+  })
+}
+
+async function sendStreakAtRisk(fastify) {
+  const db = fastify.supabase
+  const todayStr = new Date().toISOString().slice(0, 10)
+
+  // Users with a streak > 0 who haven't studied today
+  const { data: streakUsers } = await db
     .from('streaks')
-    .select('user_id, current_streak, last_activity, users(fcm_token, display_name)')
+    .select('user_id, current_streak, users!inner(fcm_token, display_name)')
     .gt('current_streak', 0)
-    .neq('last_activity', today);
+    .not('users.fcm_token', 'is', null)
 
-  if (error) {
-    console.error('[jobs] streak-at-risk fetch error:', error.message);
-    return { sent: 0, failed: 0 };
+  if (!streakUsers?.length) return
+
+  const { data: activeToday } = await db
+    .from('lesson_progress')
+    .select('user_id')
+    .eq('quiz_completed', true)
+    .gte('completed_at', `${todayStr}T00:00:00Z`)
+
+  const activeTodayIds = new Set((activeToday ?? []).map(r => r.user_id))
+
+  const atRisk = streakUsers
+    .filter(s => !activeTodayIds.has(s.user_id) && s.users?.fcm_token)
+    .map(s => ({
+      id:          s.user_id,
+      display_name: s.users.display_name,
+      fcm_token:   s.users.fcm_token,
+      streak:      s.current_streak,
+    }))
+
+  fastify.log.info(`Streak-at-risk: notifying ${atRisk.length} users`)
+
+  for (const user of atRisk) {
+    await sendFcmBatch(fastify, [user], {
+      title: `🔥 ${user.streak}-day streak at risk!`,
+      body:  'Study now before midnight to keep your streak alive.',
+    })
+  }
+}
+
+async function sendStreakLost(fastify) {
+  const db = fastify.supabase
+
+  // Users whose current_streak > 0 but last_activity was 2+ days ago
+  const twoDaysAgo = new Date()
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
+  const cutoffStr = twoDaysAgo.toISOString().slice(0, 10)
+
+  const { data: lostUsers } = await db
+    .from('streaks')
+    .select('user_id, current_streak, users!inner(fcm_token, display_name)')
+    .gt('current_streak', 0)
+    .lte('last_activity', cutoffStr)
+    .not('users.fcm_token', 'is', null)
+
+  if (!lostUsers?.length) return
+
+  // Reset their streak to 0
+  const userIds = lostUsers.map(u => u.user_id)
+  await db.from('streaks').update({ current_streak: 0 }).in('user_id', userIds)
+
+  const toNotify = lostUsers.map(s => ({
+    id:          s.user_id,
+    display_name: s.users.display_name,
+    fcm_token:   s.users.fcm_token,
+  }))
+
+  fastify.log.info(`Streak-lost: notifying ${toNotify.length} users`)
+  await sendFcmBatch(fastify, toNotify, {
+    title: '💔 Your streak ended',
+    body:  "Don't give up! Start a new streak today — every lesson counts.",
+  })
+}
+
+// ── FCM batch sender ───────────────────────────────────────────────────────────
+async function sendFcmBatch(fastify, users, notification) {
+  const FCM_KEY = process.env.FCM_SERVER_KEY
+  if (!FCM_KEY) {
+    fastify.log.warn('FCM_SERVER_KEY not set — skipping notifications')
+    return
   }
 
-  const results = await Promise.allSettled(
-    (streaks ?? [])
-      .filter(s => s.users?.fcm_token)
-      .map(s =>
-        sendPushNotification({
-          token: s.users.fcm_token,
-          title: `${s.current_streak} days — don't lose it!`,
-          body:  "You're just hours away from losing your streak. One quick lesson saves it.",
-          data:  { screen: 'lessons' },
+  for (const user of users) {
+    if (!user.fcm_token) continue
+    try {
+      const resp = await fetch('https://fcm.googleapis.com/fcm/send', {
+        method: 'POST',
+        headers: {
+          'Authorization': `key=${FCM_KEY}`,
+          'Content-Type':  'application/json',
+        },
+        body: JSON.stringify({
+          to:           user.fcm_token,
+          notification: {
+            title: notification.title,
+            body:  notification.body,
+            sound: 'default',
+          },
+          data: { click_action: 'FLUTTER_NOTIFICATION_CLICK' }
         })
-      )
-  );
-
-  return {
-    sent:   results.filter(r => r.status === 'fulfilled').length,
-    failed: results.filter(r => r.status === 'rejected').length,
-  };
+      })
+      if (!resp.ok) {
+        fastify.log.warn({ userId: user.id, status: resp.status }, 'FCM send failed')
+      }
+    } catch (err) {
+      fastify.log.error({ err, userId: user.id }, 'FCM send error')
+    }
+  }
 }
+
+module.exports = { registerJobs }
