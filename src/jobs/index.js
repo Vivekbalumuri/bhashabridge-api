@@ -12,12 +12,10 @@
  *   18:30 Sun UTC — weekly league reset (Monday 00:00 IST)
  */
 
-'use strict'
+import cron from 'node-cron'
+import { scheduleLeagueReset } from './leagueReset.js'
 
-const cron = require('node-cron')
-const { scheduleLeagueReset } = require('./leagueReset')
-
-function registerJobs(fastify) {
+export function registerJobs(fastify) {
 
   // ── Self-ping — keeps Render free tier warm ───────────────────────────────
   cron.schedule('*/10 * * * *', async () => {
@@ -69,10 +67,8 @@ function registerJobs(fastify) {
 
 async function sendDailyReminders(fastify) {
   const db = fastify.supabase
-  const yesterday = new Date()
-  yesterday.setDate(yesterday.getDate() - 1)
+  const todayStr = new Date().toISOString().slice(0, 10)
 
-  // Users who haven't completed a lesson today and have FCM token
   const { data: users } = await db
     .from('users')
     .select('id, display_name, fcm_token')
@@ -80,7 +76,6 @@ async function sendDailyReminders(fastify) {
 
   if (!users?.length) return
 
-  const todayStr = new Date().toISOString().slice(0, 10)
   const { data: activeToday } = await db
     .from('lesson_progress')
     .select('user_id')
@@ -101,7 +96,6 @@ async function sendStreakAtRisk(fastify) {
   const db = fastify.supabase
   const todayStr = new Date().toISOString().slice(0, 10)
 
-  // Users with a streak > 0 who haven't studied today
   const { data: streakUsers } = await db
     .from('streaks')
     .select('user_id, current_streak, users!inner(fcm_token, display_name)')
@@ -121,14 +115,13 @@ async function sendStreakAtRisk(fastify) {
   const atRisk = streakUsers
     .filter(s => !activeTodayIds.has(s.user_id) && s.users?.fcm_token)
     .map(s => ({
-      id:          s.user_id,
+      id:           s.user_id,
       display_name: s.users.display_name,
-      fcm_token:   s.users.fcm_token,
-      streak:      s.current_streak,
+      fcm_token:    s.users.fcm_token,
+      streak:       s.current_streak,
     }))
 
   fastify.log.info(`Streak-at-risk: notifying ${atRisk.length} users`)
-
   for (const user of atRisk) {
     await sendFcmBatch(fastify, [user], {
       title: `🔥 ${user.streak}-day streak at risk!`,
@@ -139,8 +132,6 @@ async function sendStreakAtRisk(fastify) {
 
 async function sendStreakLost(fastify) {
   const db = fastify.supabase
-
-  // Users whose current_streak > 0 but last_activity was 2+ days ago
   const twoDaysAgo = new Date()
   twoDaysAgo.setDate(twoDaysAgo.getDate() - 2)
   const cutoffStr = twoDaysAgo.toISOString().slice(0, 10)
@@ -154,14 +145,13 @@ async function sendStreakLost(fastify) {
 
   if (!lostUsers?.length) return
 
-  // Reset their streak to 0
   const userIds = lostUsers.map(u => u.user_id)
   await db.from('streaks').update({ current_streak: 0 }).in('user_id', userIds)
 
   const toNotify = lostUsers.map(s => ({
-    id:          s.user_id,
+    id:           s.user_id,
     display_name: s.users.display_name,
-    fcm_token:   s.users.fcm_token,
+    fcm_token:    s.users.fcm_token,
   }))
 
   fastify.log.info(`Streak-lost: notifying ${toNotify.length} users`)
@@ -171,7 +161,6 @@ async function sendStreakLost(fastify) {
   })
 }
 
-// ── FCM batch sender ───────────────────────────────────────────────────────────
 async function sendFcmBatch(fastify, users, notification) {
   const FCM_KEY = process.env.FCM_SERVER_KEY
   if (!FCM_KEY) {
@@ -183,19 +172,15 @@ async function sendFcmBatch(fastify, users, notification) {
     if (!user.fcm_token) continue
     try {
       const resp = await fetch('https://fcm.googleapis.com/fcm/send', {
-        method: 'POST',
+        method:  'POST',
         headers: {
           'Authorization': `key=${FCM_KEY}`,
           'Content-Type':  'application/json',
         },
         body: JSON.stringify({
           to:           user.fcm_token,
-          notification: {
-            title: notification.title,
-            body:  notification.body,
-            sound: 'default',
-          },
-          data: { click_action: 'FLUTTER_NOTIFICATION_CLICK' }
+          notification: { title: notification.title, body: notification.body, sound: 'default' },
+          data:         { click_action: 'FLUTTER_NOTIFICATION_CLICK' }
         })
       })
       if (!resp.ok) {
@@ -206,5 +191,3 @@ async function sendFcmBatch(fastify, users, notification) {
     }
   }
 }
-
-module.exports = { registerJobs }
