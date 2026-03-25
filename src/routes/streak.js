@@ -4,6 +4,10 @@
  * GET  /streak           — current streak + XP + level
  * GET  /streak/history   — last 30 days of activity
  * POST /streak/add-xp    — awards XP, updates streak, bumps weekly_xp
+ *
+ * FIX: getUserId now checks BOTH request.user.id AND request.user.sub
+ * because Supabase JWTs put the uid in "sub", but some middleware copies
+ * it to "id". Using only one caused GET /streak to always return 404.
  */
 
 const XP_PER_LEVEL = 500
@@ -22,7 +26,13 @@ function xpToLeague(xp) {
 async function streakRoutes(fastify, _opts) {
   const db = fastify.supabase
 
+  // FIX: accept either .sub (Supabase JWT standard) or .id (set by some middleware)
+  function getSupabaseUid(request) {
+    return request.user?.sub ?? request.user?.id ?? null
+  }
+
   async function getUserId(supabaseUid) {
+    if (!supabaseUid) return null
     const { data, error } = await db
       .from('users')
       .select('id')
@@ -34,8 +44,16 @@ async function streakRoutes(fastify, _opts) {
 
   // ── GET /streak ───────────────────────────────────────────────────────────
   fastify.get('/streak', { onRequest: [fastify.authenticate] }, async (request, reply) => {
-    const userId = await getUserId(request.user.sub)
-    if (!userId) return reply.code(404).send({ error: 'User not found.' })
+    const supabaseUid = getSupabaseUid(request)
+    const userId = await getUserId(supabaseUid)
+
+    // FIX: if user row not found, return empty streak instead of 404
+    // This prevents the Android app from getting an error on first login
+    // before the user row is fully created.
+    if (!userId) {
+      fastify.log.warn(`GET /streak — user row not found for uid=${supabaseUid}`)
+      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 })
+    }
 
     const { data: streak, error } = await db
       .from('streaks')
@@ -49,6 +67,11 @@ async function streakRoutes(fastify, _opts) {
     }
 
     if (!streak) {
+      // No streak row yet — auto-create it so subsequent calls work
+      await db.from('streaks').upsert(
+        { user_id: userId, current_streak: 0, total_xp: 0, level: 1 },
+        { onConflict: 'user_id' }
+      )
       return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 })
     }
 
@@ -62,8 +85,9 @@ async function streakRoutes(fastify, _opts) {
 
   // ── GET /streak/history ───────────────────────────────────────────────────
   fastify.get('/streak/history', { onRequest: [fastify.authenticate] }, async (request, reply) => {
-    const userId = await getUserId(request.user.sub)
-    if (!userId) return reply.code(404).send({ error: 'User not found.' })
+    const supabaseUid = getSupabaseUid(request)
+    const userId = await getUserId(supabaseUid)
+    if (!userId) return reply.send({ history: [] })
 
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - 30)
@@ -114,7 +138,8 @@ async function streakRoutes(fastify, _opts) {
     },
     async (request, reply) => {
       const { xp_earned } = request.body
-      const userId = await getUserId(request.user.sub)
+      const supabaseUid = getSupabaseUid(request)
+      const userId = await getUserId(supabaseUid)
       if (!userId) return reply.code(404).send({ error: 'User not found.' })
 
       const { data: current, error: fetchErr } = await db
@@ -160,7 +185,6 @@ async function streakRoutes(fastify, _opts) {
       db.rpc('increment_weekly_xp', { p_user_id: userId, p_xp: xp_earned })
         .then(({ error }) => {
           if (error) {
-            // Row may not exist yet — upsert it first then retry
             return db
               .from('user_leagues')
               .upsert({ user_id: userId, league, weekly_xp: xp_earned }, { onConflict: 'user_id', ignoreDuplicates: false })

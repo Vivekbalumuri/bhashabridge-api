@@ -1,12 +1,35 @@
 import { supabase } from '../db.js';
 
+// ── Supabase admin client — needed for resend verification ────────────────────
+// Uses SUPABASE_SERVICE_ROLE_KEY (set this on Render dashboard).
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// Deep-link base that Supabase will append the verification token to.
+// After the user taps the link the app opens via the bhashabridge:// scheme.
+const APP_REDIRECT = 'bhashabridge://verify';
+
 export default async function authRoutes(fastify) {
 
-  // ── POST /register ─────────────────────────────────────
+  // ── POST /register ─────────────────────────────────────────────────────────
+  // FIX (Issue 3): added emailRedirectTo so Supabase sends a real verification
+  // email with a deep-link back into the app instead of a generic web URL.
   fastify.post('/register', async (request, reply) => {
     const { email, password, nativeLang, learningLangs, displayName } = request.body;
 
-    const { data: authData, error: signUpError } = await supabase.auth.signUp({ email, password });
+    const { data: authData, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        // This tells Supabase where to redirect after the user taps the link.
+        // The app must handle bhashabridge://verify via its deep-link intent filter.
+        emailRedirectTo: APP_REDIRECT,
+      },
+    });
 
     if (signUpError) return reply.code(400).send({ error: signUpError.message });
     if (!authData.user) return reply.code(400).send({ error: 'User creation failed' });
@@ -18,7 +41,9 @@ export default async function authRoutes(fastify) {
         email,
         display_name:   displayName,
         native_lang:    nativeLang,
-        learning_langs: learningLangs
+        learning_langs: learningLangs,
+        // FIX: store initial verification state from Supabase
+        is_email_verified: authData.user.email_confirmed_at != null,
       })
       .select()
       .single();
@@ -39,11 +64,11 @@ export default async function authRoutes(fastify) {
     return reply.code(201).send({
       token:         authData.session?.access_token  || null,
       refresh_token: authData.session?.refresh_token || null,
-      user:          profile
+      user:          { ...profile, is_email_verified: authData.user.email_confirmed_at != null }
     });
   });
 
-  // ── POST /login ────────────────────────────────────────
+  // ── POST /login ────────────────────────────────────────────────────────────
   fastify.post('/login', async (request, reply) => {
     const { email, password } = request.body;
 
@@ -74,14 +99,48 @@ export default async function authRoutes(fastify) {
         );
     }
 
+    // FIX (Issue 3): include is_email_verified from Supabase auth record
+    // so the Android app knows whether to show the verification gate.
+    const isEmailVerified = authData.user.email_confirmed_at != null;
+
+    // Sync back to users table if it changed (e.g. user verified between logins)
+    if (profile.is_email_verified !== isEmailVerified) {
+      await supabase
+        .from('users')
+        .update({ is_email_verified: isEmailVerified })
+        .eq('id', profile.id);
+    }
+
     return {
       token:         authData.session?.access_token,
       refresh_token: authData.session?.refresh_token,
-      user:          profile
+      user:          { ...profile, is_email_verified: isEmailVerified }
     };
   });
 
-  // ── POST /forgot-password ──────────────────────────────
+  // ── POST /resend-verification ──────────────────────────────────────────────
+  // FIX (Issue 3): NEW endpoint — resends the Supabase verification email.
+  // Uses the service-role key so it can call admin auth methods.
+  fastify.post('/resend-verification', async (request, reply) => {
+    const { email } = request.body ?? {};
+    if (!email) return reply.code(400).send({ error: 'email is required' });
+
+    // Use supabaseAdmin (service role) to resend the signup confirmation
+    const { error } = await supabaseAdmin.auth.resend({
+      type:  'signup',
+      email,
+      options: { emailRedirectTo: APP_REDIRECT },
+    });
+
+    if (error) {
+      fastify.log.warn(`resend-verification for ${email}: ${error.message}`);
+      // Don't reveal whether the email exists — always 200
+    }
+
+    return reply.code(200).send({ message: 'Verification email sent if account exists.' });
+  });
+
+  // ── POST /forgot-password ──────────────────────────────────────────────────
   fastify.post('/forgot-password', async (request, reply) => {
     const { email } = request.body;
     if (!email) return reply.code(400).send({ error: 'Email is required' });
@@ -92,15 +151,12 @@ export default async function authRoutes(fastify) {
 
     if (error) fastify.log.warn(`Password reset for ${email}: ${error.message}`);
 
-    // Always 200 — never reveal whether the email exists
     return reply.code(200).send({
       message: 'If an account exists with this email, a reset link has been sent.'
     });
   });
 
-  // ── POST /reset-password ───────────────────────────────
-  // Called by ResetPasswordScreen after user taps the email link.
-  // The token is the access_token extracted from the deep link fragment.
+  // ── POST /reset-password ───────────────────────────────────────────────────
   fastify.post('/reset-password', async (request, reply) => {
     const { token, password } = request.body ?? {};
 
@@ -108,7 +164,6 @@ export default async function authRoutes(fastify) {
     if (!password) return reply.code(400).send({ error: 'password is required' });
     if (password.length < 6) return reply.code(422).send({ error: 'Password must be at least 6 characters' });
 
-    // Establish a session using the recovery access token
     const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
       access_token:  token,
       refresh_token: token
@@ -119,7 +174,6 @@ export default async function authRoutes(fastify) {
       return reply.code(400).send({ error: 'Reset link has expired or is invalid. Please request a new one.' });
     }
 
-    // Update the password in the established session
     const { error: updateError } = await supabase.auth.updateUser({ password });
 
     if (updateError) {
@@ -130,14 +184,11 @@ export default async function authRoutes(fastify) {
     return reply.code(200).send({ success: true, message: 'Password updated successfully' });
   });
 
-  // ── POST /auth/google ──────────────────────────────────
-  // Receives Firebase ID token from Android, verifies with Supabase,
-  // creates/fetches user profile, returns same shape as /login
+  // ── POST /auth/google ──────────────────────────────────────────────────────
   fastify.post('/google', async (request, reply) => {
     const { id_token } = request.body ?? {};
     if (!id_token) return reply.code(400).send({ error: 'id_token is required' });
 
-    // Exchange Firebase ID token for a Supabase session
     const { data: authData, error: authError } = await supabase.auth.signInWithIdToken({
       provider: 'google',
       token: id_token,
@@ -150,22 +201,22 @@ export default async function authRoutes(fastify) {
 
     const supabaseUid = authData.user.id;
 
-    // Upsert user profile — create on first Google login, fetch on subsequent
     const { data: profile, error: upsertError } = await supabase
       .from('users')
       .upsert({
-        supabase_uid: supabaseUid,
-        email:        authData.user.email,
-        display_name: authData.user.user_metadata?.full_name
-                   ?? authData.user.user_metadata?.name
-                   ?? authData.user.email?.split('@')[0],
+        supabase_uid:      supabaseUid,
+        email:             authData.user.email,
+        display_name:      authData.user.user_metadata?.full_name
+                        ?? authData.user.user_metadata?.name
+                        ?? authData.user.email?.split('@')[0],
+        // Google accounts are always verified
+        is_email_verified: true,
       }, { onConflict: 'supabase_uid' })
       .select()
       .single();
 
     if (upsertError) return reply.code(400).send({ error: upsertError.message });
 
-    // Ensure streak row exists
     await supabase
       .from('streaks')
       .upsert(
@@ -177,11 +228,13 @@ export default async function authRoutes(fastify) {
     return reply.send({
       token:         authData.session?.access_token,
       refresh_token: authData.session?.refresh_token,
-      user:          profile,
+      user:          { ...profile, is_email_verified: true },
     });
   });
 
-  // ── GET /me ────────────────────────────────────────────
+  // ── GET /me ────────────────────────────────────────────────────────────────
+  // FIX (Issue 3): now reads is_email_verified from Supabase auth (source of truth)
+  // instead of trusting only the users table value.
   fastify.get('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { data: profile, error } = await supabase
       .from('users')
@@ -197,7 +250,6 @@ export default async function authRoutes(fastify) {
       const expired = new Date(profile.premium_expires_at) < new Date();
       if (expired) {
         isPremium = false;
-        // Write back so the DB stays consistent
         await supabase
           .from('users')
           .update({ is_premium: false })
@@ -205,14 +257,34 @@ export default async function authRoutes(fastify) {
       }
     }
 
+    // FIX: fetch the live verification state from Supabase auth
+    // so /me always returns the correct value even after the user clicks the link.
+    let isEmailVerified = profile.is_email_verified ?? false;
+    try {
+      const { data: authUser } = await supabaseAdmin.auth.admin.getUserById(profile.supabase_uid);
+      if (authUser?.user) {
+        isEmailVerified = authUser.user.email_confirmed_at != null;
+        // Sync to users table if it changed
+        if (profile.is_email_verified !== isEmailVerified) {
+          await supabase
+            .from('users')
+            .update({ is_email_verified: isEmailVerified })
+            .eq('id', profile.id);
+        }
+      }
+    } catch (e) {
+      fastify.log.warn(`Could not fetch auth user for verification check: ${e.message}`);
+    }
+
     return {
       ...profile,
       is_premium:          isPremium,
       premium_expires_at:  profile.premium_expires_at ?? null,
+      is_email_verified:   isEmailVerified,
     };
   });
 
-  // ── PATCH /me ──────────────────────────────────────────
+  // ── PATCH /me ──────────────────────────────────────────────────────────────
   fastify.patch('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { displayName, dailyGoalMin, fcmToken } = request.body;
 
@@ -232,7 +304,7 @@ export default async function authRoutes(fastify) {
     return { user: profile };
   });
 
-  // ── PATCH /me/fcm-token ────────────────────────────────
+  // ── PATCH /me/fcm-token ────────────────────────────────────────────────────
   fastify.patch('/me/fcm-token', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const { fcm_token } = request.body ?? {};
     if (!fcm_token || typeof fcm_token !== 'string') {
@@ -248,7 +320,7 @@ export default async function authRoutes(fastify) {
     return { success: true };
   });
 
-  // ── DELETE /me ─────────────────────────────────────────
+  // ── DELETE /me ─────────────────────────────────────────────────────────────
   fastify.delete('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const uid = request.user.id;
 
@@ -264,7 +336,7 @@ export default async function authRoutes(fastify) {
     return { success: true };
   });
 
-  // ── POST /refresh ──────────────────────────────────────
+  // ── POST /refresh ──────────────────────────────────────────────────────────
   fastify.post('/refresh', async (request, reply) => {
     const { refresh_token } = request.body;
     if (!refresh_token) return reply.code(400).send({ error: 'refresh_token required' });

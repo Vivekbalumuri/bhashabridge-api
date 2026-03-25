@@ -34,7 +34,6 @@ function dedupWords(words) {
 
 // Free users get MCQ only.
 // Premium users get MCQ + TrueFalse + TapCorrect.
-// FillBlank removed entirely.
 function getQuizType(index, isPremium) {
   if (!isPremium) return 'mcq';
   const types = ['mcq', 'mcq', 'true_false', 'mcq', 'tap_correct',
@@ -42,21 +41,28 @@ function getQuizType(index, isPremium) {
   return types[index % types.length];
 }
 
-function buildTrueFalseOptions(word, otherWords, targetLang) {
+// FIX: both builders now receive distractorPool (ALL lesson words minus current)
+// instead of only the other words in the current 10-question session.
+// This prevents near-empty distractor lists when lessons have many words
+// but only 10 are picked per session.
+
+function buildTrueFalseOptions(word, distractorPool, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
     const ld = resolveText(getLangText(word, targetLang), targetLang, word);
     return [{ id: word.id + '_tf', text: ld.text, correct: true }];
   }
-  const wrong = otherWords[Math.floor(Math.random() * otherWords.length)];
+  // Pick one random wrong word from the FULL lesson pool
+  const wrong = distractorPool[Math.floor(Math.random() * distractorPool.length)];
   const ld = resolveText(getLangText(wrong || word, targetLang), targetLang, wrong || word);
   return [{ id: (wrong?.id || word.id) + '_tf', text: ld.text, correct: false }];
 }
 
-function buildTapCorrectOptions(word, otherWords, targetLang) {
+function buildTapCorrectOptions(word, distractorPool, targetLang) {
   const correctLd = resolveText(getLangText(word, targetLang), targetLang, word);
   const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
-  const wrongPool = otherWords
+  // Pick up to 5 distractors from the full lesson pool
+  const wrongPool = [...distractorPool]
     .sort(() => Math.random() - 0.5)
     .slice(0, 5)
     .map(w => {
@@ -84,7 +90,7 @@ async function getUserIsPremium(supabaseUid) {
 export default async function lessonRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
-  // GET /lessons?direction=
+  // ── GET /lessons?direction= ───────────────────────────────────────────────
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
     let query = supabase
@@ -97,7 +103,7 @@ export default async function lessonRoutes(fastify) {
     return { lessons: lessons || [] };
   });
 
-  // GET /lessons/:id/learn
+  // ── GET /lessons/:id/learn ────────────────────────────────────────────────
   fastify.get('/:id/learn', async (request, reply) => {
     const { id } = request.params;
     const [lessonResult, isPremium] = await Promise.all([
@@ -115,8 +121,7 @@ export default async function lessonRoutes(fastify) {
     const allWords = dedupWords(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Alphabet/phonics lessons (module_order 1-18): preserve sort_order so
-    // characters are presented in correct script sequence during learn phase.
+    // Alphabet/phonics lessons (module_order 1-18): preserve sort_order.
     // Vocabulary lessons: shuffle for variety.
     const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
     const words = isScriptLesson
@@ -132,7 +137,6 @@ export default async function lessonRoutes(fastify) {
       const rawBack  = getLangText(word, targetLang);
       const rawAlso  = getLangText(word, alsoLang);
 
-      // Always show native script — fallback to english if empty
       const front = resolveText(rawFront, sourceLang, word);
       const back  = resolveText(rawBack,  targetLang, word);
       const also  = resolveText(rawAlso,  alsoLang,   word);
@@ -142,7 +146,7 @@ export default async function lessonRoutes(fastify) {
         word_id: word.id,
         front: {
           text:            front.text,
-          translit:        rawFront.translit,   // always included as helper
+          translit:        rawFront.translit,
           lang:            sourceLang,
           audio_text:      rawFront.text || word.english,
           audio_lang_code: sourceLang,
@@ -167,16 +171,16 @@ export default async function lessonRoutes(fastify) {
 
     return {
       lesson,
-      phase:       'learn',
-      base_lang:   targetLang,
-      learn_lang:  sourceLang,
-      total_cards: flashcards.length,
+      phase:           'learn',
+      base_lang:       targetLang,
+      learn_lang:      sourceLang,
+      total_cards:     flashcards.length,
       flashcards,
       is_premium_user: isPremium,
     };
   });
 
-  // GET /lessons/:id/quiz
+  // ── GET /lessons/:id/quiz ─────────────────────────────────────────────────
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
     const [lessonResult, isPremium] = await Promise.all([
@@ -194,8 +198,8 @@ export default async function lessonRoutes(fastify) {
     const allWords = dedupWords(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Shuffle and limit to 10 questions per session
-    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 10);
+    // Pick up to 10 words for questions — shuffle for variety each session
+    const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
@@ -203,26 +207,46 @@ export default async function lessonRoutes(fastify) {
     const questions = words.map((word, index) => {
       const rawQuestion = getLangText(word, sourceLang);
       const question    = resolveText(rawQuestion, sourceLang, word);
-      const otherWords  = words.filter(w => w.id !== word.id);
       const type        = getQuizType(index, isPremium);
+
+      // FIX: distractorPool = ALL lesson words minus the current word.
+      // Previously this was only `words.filter(...)` — i.e. the 10 quiz words —
+      // which gave very few distractors and made answers obvious or nonsensical.
+      const distractorPool = allWords.filter(w => w.id !== word.id);
 
       let options;
       switch (type) {
         case 'true_false':
-          options = buildTrueFalseOptions(word, otherWords, targetLang);
+          options = buildTrueFalseOptions(word, distractorPool, targetLang);
           break;
+
         case 'tap_correct':
-          options = buildTapCorrectOptions(word, otherWords, targetLang);
+          options = buildTapCorrectOptions(word, distractorPool, targetLang);
           break;
-        default: { // mcq
-          const shuffled = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
-          const wrongOptions = shuffled.map(w => {
+
+        default: { // mcq — 1 correct + 3 wrong from FULL lesson pool
+          const shuffledDistractors = [...distractorPool]
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+          const wrongOptions = shuffledDistractors.map(w => {
             const ld = resolveText(getLangText(w, targetLang), targetLang, w);
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
-          const correctLd = resolveText(getLangText(word, targetLang), targetLang, word);
+
+          // If lesson has fewer than 4 words, pad with english fallbacks
+          // so the UI never shows duplicate or empty options.
+          while (wrongOptions.length < 3) {
+            wrongOptions.push({
+              id:      `pad_${wrongOptions.length}`,
+              text:    '—',
+              correct: false,
+            });
+          }
+
+          const correctLd     = resolveText(getLangText(word, targetLang), targetLang, word);
           const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
-          const insertAt = Math.floor(Math.random() * 4);
+          const insertAt      = Math.floor(Math.random() * 4);
           options = [...wrongOptions];
           options.splice(insertAt, 0, correctOption);
           break;
@@ -235,7 +259,7 @@ export default async function lessonRoutes(fastify) {
         type,
         question: {
           text:            question.text,
-          translit:        rawQuestion.translit,  // always included as helper
+          translit:        rawQuestion.translit,
           lang:            sourceLang,
           audio_text:      rawQuestion.text || word.english,
           audio_lang_code: sourceLang,
@@ -255,7 +279,7 @@ export default async function lessonRoutes(fastify) {
     };
   });
 
-  // GET /lessons/final-exam/:direction
+  // ── GET /lessons/final-exam/:direction ────────────────────────────────────
   // 15 random questions from ALL alphabet+phonics words (module_order 1-18).
   // Available to free and premium users alike.
   fastify.get('/final-exam/:direction', async (request, reply) => {
@@ -277,7 +301,8 @@ export default async function lessonRoutes(fastify) {
 
     const lessonIds = lessonRows.map(l => l.id);
 
-    // Step 2: fetch all words belonging to those lessons
+    // Step 2: fetch ALL words from those lessons — used for both questions
+    // and distractor pool so options are always in-syllabus.
     const { data: rawWords, error } = await supabase
       .from('words')
       .select(`
@@ -294,29 +319,42 @@ export default async function lessonRoutes(fastify) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
     }
 
-    const words = allWords.sort(() => Math.random() - 0.5).slice(0, 15);
+    // Pick 15 random words for questions
+    const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
     const [sourceLang, targetLang] = direction.split('-');
 
     const questions = words.map((word, index) => {
       const rawQuestion = getLangText(word, sourceLang);
       const question    = resolveText(rawQuestion, sourceLang, word);
-      const otherWords  = words.filter(w => w.id !== word.id);
       const type        = getQuizType(index, isPremium);
+
+      // FIX: distractors drawn from ALL exam words, not just remaining 14
+      const distractorPool = allWords.filter(w => w.id !== word.id);
 
       let options;
       switch (type) {
         case 'true_false':
-          options = buildTrueFalseOptions(word, otherWords, targetLang);
+          options = buildTrueFalseOptions(word, distractorPool, targetLang);
           break;
+
         case 'tap_correct':
-          options = buildTapCorrectOptions(word, otherWords, targetLang);
+          options = buildTapCorrectOptions(word, distractorPool, targetLang);
           break;
+
         default: {
-          const shuffled = [...otherWords].sort(() => Math.random() - 0.5).slice(0, 3);
+          const shuffled = [...distractorPool]
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
           const wrongOptions = shuffled.map(w => {
             const ld = resolveText(getLangText(w, targetLang), targetLang, w);
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
+
+          while (wrongOptions.length < 3) {
+            wrongOptions.push({ id: `pad_${wrongOptions.length}`, text: '—', correct: false });
+          }
+
           const correctLd    = resolveText(getLangText(word, targetLang), targetLang, word);
           const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
           options = [...wrongOptions];
