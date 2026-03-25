@@ -1,12 +1,16 @@
 import { supabase } from '../db.js';
 
 // ── Supabase admin client — needed for resend verification ────────────────────
-// Uses SUPABASE_SERVICE_ROLE_KEY (set this on Render dashboard).
+// Uses SUPABASE_SERVICE_KEY (set this on Render dashboard).
 import { createClient } from '@supabase/supabase-js';
 
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+  console.warn("⚠️  WARNING: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in your .env file.");
+}
+
 const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
+  process.env.SUPABASE_SERVICE_KEY || 'placeholder-key'
 );
 
 // Deep-link base that Supabase will append the verification token to.
