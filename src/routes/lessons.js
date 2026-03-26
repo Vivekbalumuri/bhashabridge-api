@@ -10,8 +10,6 @@ function getLangText(word, langCode) {
   }
 }
 
-// No script gate — everyone sees native script.
-// Falls back to english if script is empty (alphabet lessons).
 function resolveText(langData, langCode, word) {
   if (langData.text) return langData;
   if (langCode === 'en') return langData;
@@ -23,11 +21,16 @@ function getAlsoLang(sourceLang, targetLang) {
   return all.find(l => l !== sourceLang && l !== targetLang) || 'en';
 }
 
-function dedupWords(words) {
+// FIX: dedupWords now deduplicates by word ID (not english text).
+// The old version deduped by english which silently dropped legitimate words
+// that happened to share the same english value across different lessons
+// (e.g. "a", "aa", "i" appear in both te-en and te-ta vowel lessons).
+// Within a single lesson, word IDs are always unique so this is safe.
+function dedupById(words) {
   const seen = new Set();
   return words.filter(w => {
-    if (seen.has(w.english)) return false;
-    seen.add(w.english);
+    if (seen.has(w.id)) return false;
+    seen.add(w.id);
     return true;
   });
 }
@@ -41,18 +44,12 @@ function getQuizType(index, isPremium) {
   return types[index % types.length];
 }
 
-// FIX: both builders now receive distractorPool (ALL lesson words minus current)
-// instead of only the other words in the current 10-question session.
-// This prevents near-empty distractor lists when lessons have many words
-// but only 10 are picked per session.
-
 function buildTrueFalseOptions(word, distractorPool, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
     const ld = resolveText(getLangText(word, targetLang), targetLang, word);
     return [{ id: word.id + '_tf', text: ld.text, correct: true }];
   }
-  // Pick one random wrong word from the FULL lesson pool
   const wrong = distractorPool[Math.floor(Math.random() * distractorPool.length)];
   const ld = resolveText(getLangText(wrong || word, targetLang), targetLang, wrong || word);
   return [{ id: (wrong?.id || word.id) + '_tf', text: ld.text, correct: false }];
@@ -61,7 +58,6 @@ function buildTrueFalseOptions(word, distractorPool, targetLang) {
 function buildTapCorrectOptions(word, distractorPool, targetLang) {
   const correctLd = resolveText(getLangText(word, targetLang), targetLang, word);
   const correctOption = { id: word.id + '_correct', text: correctLd.text, correct: true };
-  // Pick up to 5 distractors from the full lesson pool
   const wrongPool = [...distractorPool]
     .sort(() => Math.random() - 0.5)
     .slice(0, 5)
@@ -115,18 +111,20 @@ export default async function lessonRoutes(fastify) {
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
     const { data: rawWords, error: wordsError } = await supabase
-      .from('words').select('*').eq('lesson_id', id).order('sort_order', { ascending: true });
+      .from('words')
+      .select('*')
+      .eq('lesson_id', id)
+      .order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    const allWords = dedupWords(rawWords || []);
+    // FIX: use dedupById — never drop words based on matching english text
+    const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Alphabet/phonics lessons (module_order 1-18): preserve sort_order.
-    // Vocabulary lessons: shuffle for variety.
     const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
     const words = isScriptLesson
       ? [...allWords].sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999)).slice(0, 10)
-      : allWords.sort(() => Math.random() - 0.5).slice(0, 10);
+      : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
@@ -192,13 +190,18 @@ export default async function lessonRoutes(fastify) {
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
     const { data: rawWords, error: wordsError } = await supabase
-      .from('words').select('*').eq('lesson_id', id).order('sort_order', { ascending: true });
+      .from('words')
+      .select('*')
+      .eq('lesson_id', id)
+      .order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    const allWords = dedupWords(rawWords || []);
+    // FIX: dedupById preserves all words in this lesson regardless of
+    // whether their english text matches words in other lessons.
+    const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Pick up to 10 words for questions — shuffle for variety each session
+    // Pick up to 10 words for questions
     const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
@@ -209,9 +212,8 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      // FIX: distractorPool = ALL lesson words minus the current word.
-      // Previously this was only `words.filter(...)` — i.e. the 10 quiz words —
-      // which gave very few distractors and made answers obvious or nonsensical.
+      // Distractor pool = ALL words in this lesson minus the current word.
+      // Using allWords (not words) gives the largest possible pool.
       const distractorPool = allWords.filter(w => w.id !== word.id);
 
       let options;
@@ -224,7 +226,7 @@ export default async function lessonRoutes(fastify) {
           options = buildTapCorrectOptions(word, distractorPool, targetLang);
           break;
 
-        default: { // mcq — 1 correct + 3 wrong from FULL lesson pool
+        default: { // mcq — 1 correct + 3 wrong from full lesson pool
           const shuffledDistractors = [...distractorPool]
             .sort(() => Math.random() - 0.5)
             .slice(0, 3);
@@ -234,8 +236,7 @@ export default async function lessonRoutes(fastify) {
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
 
-          // If lesson has fewer than 4 words, pad with english fallbacks
-          // so the UI never shows duplicate or empty options.
+          // Pad if lesson has fewer than 4 words (e.g. Part 5 has only 3)
           while (wrongOptions.length < 3) {
             wrongOptions.push({
               id:      `pad_${wrongOptions.length}`,
@@ -280,13 +281,10 @@ export default async function lessonRoutes(fastify) {
   });
 
   // ── GET /lessons/final-exam/:direction ────────────────────────────────────
-  // 15 random questions from ALL alphabet+phonics words (module_order 1-18).
-  // Available to free and premium users alike.
   fastify.get('/final-exam/:direction', async (request, reply) => {
     const { direction } = request.params;
     const isPremium = await getUserIsPremium(request.user.id);
 
-    // Step 1: get lesson IDs for module_order 1-18 in this direction
     const { data: lessonRows, error: lessonError } = await supabase
       .from('lessons')
       .select('id')
@@ -301,8 +299,6 @@ export default async function lessonRoutes(fastify) {
 
     const lessonIds = lessonRows.map(l => l.id);
 
-    // Step 2: fetch ALL words from those lessons — used for both questions
-    // and distractor pool so options are always in-syllabus.
     const { data: rawWords, error } = await supabase
       .from('words')
       .select(`
@@ -314,12 +310,12 @@ export default async function lessonRoutes(fastify) {
 
     if (error) return reply.code(400).send({ error: error.message });
 
-    const allWords = dedupWords(rawWords || []);
+    // FIX: dedupById for final exam too
+    const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
     }
 
-    // Pick 15 random words for questions
     const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
     const [sourceLang, targetLang] = direction.split('-');
 
@@ -328,7 +324,6 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      // FIX: distractors drawn from ALL exam words, not just remaining 14
       const distractorPool = allWords.filter(w => w.id !== word.id);
 
       let options;
