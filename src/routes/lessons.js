@@ -21,11 +21,6 @@ function getAlsoLang(sourceLang, targetLang) {
   return all.find(l => l !== sourceLang && l !== targetLang) || 'en';
 }
 
-// FIX: dedupWords now deduplicates by word ID (not english text).
-// The old version deduped by english which silently dropped legitimate words
-// that happened to share the same english value across different lessons
-// (e.g. "a", "aa", "i" appear in both te-en and te-ta vowel lessons).
-// Within a single lesson, word IDs are always unique so this is safe.
 function dedupById(words) {
   const seen = new Set();
   return words.filter(w => {
@@ -35,8 +30,6 @@ function dedupById(words) {
   });
 }
 
-// Free users get MCQ only.
-// Premium users get MCQ + TrueFalse + TapCorrect.
 function getQuizType(index, isPremium) {
   if (!isPremium) return 'mcq';
   const types = ['mcq', 'mcq', 'true_false', 'mcq', 'tap_correct',
@@ -117,7 +110,6 @@ export default async function lessonRoutes(fastify) {
       .order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    // FIX: use dedupById — never drop words based on matching english text
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
@@ -181,6 +173,11 @@ export default async function lessonRoutes(fastify) {
   // ── GET /lessons/:id/quiz ─────────────────────────────────────────────────
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
+
+    // ── DEBUG: log every quiz request so we can trace the exact lesson + words ──
+    // Remove these log lines once the out-of-syllabus bug is confirmed fixed.
+    fastify.log.info(`QUIZ_VERSION=dedupById lessonId=${id}`);
+
     const [lessonResult, isPremium] = await Promise.all([
       supabase.from('lessons').select('*').eq('id', id).single(),
       getUserIsPremium(request.user.id),
@@ -196,12 +193,20 @@ export default async function lessonRoutes(fastify) {
       .order('sort_order', { ascending: true });
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
-    // FIX: dedupById preserves all words in this lesson regardless of
-    // whether their english text matches words in other lessons.
     const allWords = dedupById(rawWords || []);
+
+    // ── DEBUG: log exactly which words the DB returned for this lesson ─────────
+    fastify.log.info({
+      lessonId:   id,
+      lessonTitle: lesson.title,
+      direction:  lesson.direction,
+      rawCount:   rawWords?.length ?? 0,
+      dedupCount: allWords.length,
+      words:      allWords.map(w => ({ id: w.id, english: w.english, lesson_id: w.lesson_id })),
+    }, 'QUIZ_WORDS');
+
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Pick up to 10 words for questions
     const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
     const direction = lesson.direction || 'te-en';
@@ -212,8 +217,6 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      // Distractor pool = ALL words in this lesson minus the current word.
-      // Using allWords (not words) gives the largest possible pool.
       const distractorPool = allWords.filter(w => w.id !== word.id);
 
       let options;
@@ -226,7 +229,7 @@ export default async function lessonRoutes(fastify) {
           options = buildTapCorrectOptions(word, distractorPool, targetLang);
           break;
 
-        default: { // mcq — 1 correct + 3 wrong from full lesson pool
+        default: {
           const shuffledDistractors = [...distractorPool]
             .sort(() => Math.random() - 0.5)
             .slice(0, 3);
@@ -236,7 +239,6 @@ export default async function lessonRoutes(fastify) {
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
 
-          // Pad if lesson has fewer than 4 words (e.g. Part 5 has only 3)
           while (wrongOptions.length < 3) {
             wrongOptions.push({
               id:      `pad_${wrongOptions.length}`,
@@ -268,6 +270,16 @@ export default async function lessonRoutes(fastify) {
         options,
       };
     });
+
+    // ── DEBUG: log the final questions being sent to the app ──────────────────
+    fastify.log.info({
+      lessonId:  id,
+      questions: questions.map(q => ({
+        word_id: q.word_id,
+        question: q.question.text,
+        options:  q.options.map(o => o.text),
+      })),
+    }, 'QUIZ_QUESTIONS');
 
     return {
       lesson,
@@ -310,7 +322,6 @@ export default async function lessonRoutes(fastify) {
 
     if (error) return reply.code(400).send({ error: error.message });
 
-    // FIX: dedupById for final exam too
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
