@@ -37,6 +37,7 @@ function getQuizType(index, isPremium) {
   return types[index % types.length];
 }
 
+// distractorPool is always the SESSION words (same 10 shown in learn phase)
 function buildTrueFalseOptions(word, distractorPool, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
@@ -174,10 +175,6 @@ export default async function lessonRoutes(fastify) {
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
 
-    // ── DEBUG: log every quiz request so we can trace the exact lesson + words ──
-    // Remove these log lines once the out-of-syllabus bug is confirmed fixed.
-    fastify.log.info(`QUIZ_VERSION=dedupById lessonId=${id}`);
-
     const [lessonResult, isPremium] = await Promise.all([
       supabase.from('lessons').select('*').eq('id', id).single(),
       getUserIsPremium(request.user.id),
@@ -194,20 +191,18 @@ export default async function lessonRoutes(fastify) {
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
     const allWords = dedupById(rawWords || []);
-
-    // ── DEBUG: log exactly which words the DB returned for this lesson ─────────
-    fastify.log.info({
-      lessonId:   id,
-      lessonTitle: lesson.title,
-      direction:  lesson.direction,
-      rawCount:   rawWords?.length ?? 0,
-      dedupCount: allWords.length,
-      words:      allWords.map(w => ({ id: w.id, english: w.english, lesson_id: w.lesson_id })),
-    }, 'QUIZ_WORDS');
-
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
+    // KEY FIX: pick the session words first (same 10 the user saw in learn phase).
+    // ALL questions AND ALL distractor options come ONLY from these 10 words.
+    // This means the user is never tested on or shown words they haven't seen yet.
+    const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
+    const sessionWords = isScriptLesson
+      ? [...allWords].sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999)).slice(0, 10)
+      : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
+
+    // Shuffle the session words so question order differs from learn order
+    const words = [...sessionWords].sort(() => Math.random() - 0.5);
 
     const direction = lesson.direction || 'te-en';
     const [sourceLang, targetLang] = direction.split('-');
@@ -217,7 +212,9 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      const distractorPool = allWords.filter(w => w.id !== word.id);
+      // ONLY use other words from the same 10-word session as distractors.
+      // Never pull from allWords (full lesson) — that would show unseen words.
+      const distractorPool = sessionWords.filter(w => w.id !== word.id);
 
       let options;
       switch (type) {
@@ -229,7 +226,7 @@ export default async function lessonRoutes(fastify) {
           options = buildTapCorrectOptions(word, distractorPool, targetLang);
           break;
 
-        default: {
+        default: { // mcq
           const shuffledDistractors = [...distractorPool]
             .sort(() => Math.random() - 0.5)
             .slice(0, 3);
@@ -239,12 +236,9 @@ export default async function lessonRoutes(fastify) {
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
 
+          // Pad only if session has fewer than 4 words (very small lessons)
           while (wrongOptions.length < 3) {
-            wrongOptions.push({
-              id:      `pad_${wrongOptions.length}`,
-              text:    '—',
-              correct: false,
-            });
+            wrongOptions.push({ id: `pad_${wrongOptions.length}`, text: '—', correct: false });
           }
 
           const correctLd     = resolveText(getLangText(word, targetLang), targetLang, word);
@@ -270,16 +264,6 @@ export default async function lessonRoutes(fastify) {
         options,
       };
     });
-
-    // ── DEBUG: log the final questions being sent to the app ──────────────────
-    fastify.log.info({
-      lessonId:  id,
-      questions: questions.map(q => ({
-        word_id: q.word_id,
-        question: q.question.text,
-        options:  q.options.map(o => o.text),
-      })),
-    }, 'QUIZ_QUESTIONS');
 
     return {
       lesson,
@@ -327,15 +311,17 @@ export default async function lessonRoutes(fastify) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
     }
 
-    const words = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
+    // Final exam: pick 15 words — distractors from the same 15
+    const examWords = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
     const [sourceLang, targetLang] = direction.split('-');
 
-    const questions = words.map((word, index) => {
+    const questions = examWords.map((word, index) => {
       const rawQuestion = getLangText(word, sourceLang);
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      const distractorPool = allWords.filter(w => w.id !== word.id);
+      // Distractors only from the 15 exam words — same principle
+      const distractorPool = examWords.filter(w => w.id !== word.id);
 
       let options;
       switch (type) {
