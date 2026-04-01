@@ -4,7 +4,7 @@ import { recordActivity } from '../services/streakService.js';
 export default async function progressRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
-  // ─── GET /progress/summary?direction=te-en ─────────────────────────────────
+  // ─── GET /progress/summary?direction= ─────────────────────────────────────
   fastify.get('/summary', async (request, reply) => {
     const { direction } = request.query;
     const userId = request.user.id;
@@ -59,7 +59,7 @@ export default async function progressRoutes(fastify) {
     };
   });
 
-  // ─── GET /progress?direction=te-en ─────────────────────────────────────────
+  // ─── GET /progress?direction= ──────────────────────────────────────────────
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
     if (!direction) return reply.code(400).send({ error: 'direction is required' });
@@ -73,12 +73,7 @@ export default async function progressRoutes(fastify) {
       .order('module_order', { ascending: true });
 
     if (lessonsError) return reply.code(400).send({ error: lessonsError.message });
-
-    // ── FIX: return empty list instead of 404 when no lessons yet ─────────────
-    // This prevents the app from showing a server error on new directions
-    if (!lessons || lessons.length === 0) {
-      return { direction, lessons: [] };
-    }
+    if (!lessons || lessons.length === 0) return { direction, lessons: [] };
 
     const { data: progressRows } = await supabase
       .from('lesson_progress')
@@ -91,14 +86,22 @@ export default async function progressRoutes(fastify) {
 
     let foundCurrent = false;
     const result = lessons.map((lesson, index) => {
-      const progress   = progressMap[lesson.id];
-      const isFirst    = index === 0;
+      const progress  = progressMap[lesson.id];
+      const isFirst   = index === 0;
       const prevLesson = index > 0 ? lessons[index - 1] : null;
-      const prevDone   = prevLesson
+
+      // FIX: unlock is STRICTLY sequential — a lesson unlocks only when the
+      // previous lesson's quiz is completed. We do NOT trust the stored
+      // progress.unlocked flag because old migration data left stale rows
+      // with unlocked=true on lessons the user never actually reached.
+      const prevDone = prevLesson
         ? progressMap[prevLesson.id]?.quiz_completed === true
         : true;
 
-      const unlocked         = isFirst || prevDone || progress?.unlocked === true;
+      // Only the first lesson or lessons whose predecessor is done are unlocked.
+      // The stored unlocked flag is intentionally ignored to prevent stale data
+      // from unlocking lessons out of order.
+      const unlocked        = isFirst || prevDone;
       const listen_completed = progress?.listen_completed || false;
       const quiz_completed   = progress?.quiz_completed   || false;
       const fully_completed  = listen_completed && quiz_completed;
@@ -206,22 +209,23 @@ export default async function progressRoutes(fastify) {
 
     if (progressError) return reply.code(400).send({ error: progressError.message });
 
-    const { data: currentLesson } = await supabase
+    // FIX: find the next lesson by position in the ordered list, NOT by
+    // module_order + 1. This handles gaps in module_order (e.g. 10 → 12).
+    const { data: allLessons } = await supabase
       .from('lessons')
-      .select('module_order')
-      .eq('id', lesson_id)
-      .single();
+      .select('id, module_order')
+      .eq('direction', direction)
+      .order('module_order', { ascending: true });
 
     let next_lesson_unlocked = false;
     let next_lesson_id       = null;
 
-    if (currentLesson) {
-      const { data: nextLesson } = await supabase
-        .from('lessons')
-        .select('id')
-        .eq('direction', direction)
-        .eq('module_order', currentLesson.module_order + 1)
-        .single();
+    if (allLessons) {
+      const currentIndex = allLessons.findIndex(l => l.id === lesson_id);
+      // Next lesson is the one immediately after in sorted order
+      const nextLesson = currentIndex >= 0 && currentIndex < allLessons.length - 1
+        ? allLessons[currentIndex + 1]
+        : null;
 
       if (nextLesson) {
         next_lesson_id = nextLesson.id;
