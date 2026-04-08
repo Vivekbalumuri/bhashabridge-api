@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { recordActivity } from '../services/streakService.js';
 
 function getLangText(word, langCode) {
   switch (langCode) {
@@ -37,7 +38,6 @@ function getQuizType(index, isPremium) {
   return types[index % types.length];
 }
 
-// distractorPool is always the SESSION words (same 10 shown in learn phase)
 function buildTrueFalseOptions(word, distractorPool, targetLang) {
   const showCorrect = Math.random() > 0.5;
   if (showCorrect) {
@@ -77,6 +77,16 @@ async function getUserIsPremium(supabaseUid) {
   }
 }
 
+// Resolve the effective direction for learn/quiz:
+// If lesson.direction is 'both', use the direction param from the request.
+// Otherwise use the lesson's own direction.
+function resolveDirection(lessonDirection, requestDirection) {
+  if (!lessonDirection || lessonDirection === 'both') {
+    return requestDirection || 'en-te';
+  }
+  return lessonDirection;
+}
+
 export default async function lessonRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
@@ -87,7 +97,11 @@ export default async function lessonRoutes(fastify) {
       .from('lessons')
       .select('id, title, description, direction, module_order, order_index, is_premium, skill_type, word_count, tier, xp_reward')
       .order('module_order', { ascending: true });
-    if (direction) query = query.eq('direction', direction);
+
+    if (direction) {
+      query = query.or(`direction.eq.${direction},direction.eq.both`);
+    }
+
     const { data: lessons, error } = await query;
     if (error) return reply.code(400).send({ error: error.message });
     return { lessons: lessons || [] };
@@ -96,6 +110,9 @@ export default async function lessonRoutes(fastify) {
   // ── GET /lessons/:id/learn ────────────────────────────────────────────────
   fastify.get('/:id/learn', async (request, reply) => {
     const { id } = request.params;
+    // direction param tells us which language pair the user is studying
+    const requestDirection = request.query.direction || 'en-te';
+
     const [lessonResult, isPremium] = await Promise.all([
       supabase.from('lessons').select('*').eq('id', id).single(),
       getUserIsPremium(request.user.id),
@@ -104,6 +121,7 @@ export default async function lessonRoutes(fastify) {
     if (lessonError || !lesson) return reply.code(404).send({ error: 'Lesson not found' });
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
+    // Words sorted by sort_order ascending — always in the correct sequence
     const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
@@ -114,12 +132,15 @@ export default async function lessonRoutes(fastify) {
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
+    // Script lessons (1-18): always take words in sort_order — no shuffle
+    // Other lessons: shuffle for variety, take 10
     const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
     const words = isScriptLesson
-      ? [...allWords].sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999)).slice(0, 10)
+      ? allWords.slice(0, 10)  // already sorted by sort_order from DB query
       : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
-    const direction = lesson.direction || 'te-en';
+    // Use request direction (user's chosen language pair) not lesson.direction
+    const direction = resolveDirection(lesson.direction, requestDirection);
     const [sourceLang, targetLang] = direction.split('-');
     const alsoLang = getAlsoLang(sourceLang, targetLang);
 
@@ -174,6 +195,7 @@ export default async function lessonRoutes(fastify) {
   // ── GET /lessons/:id/quiz ─────────────────────────────────────────────────
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
+    const requestDirection = request.query.direction || 'en-te';
 
     const [lessonResult, isPremium] = await Promise.all([
       supabase.from('lessons').select('*').eq('id', id).single(),
@@ -183,6 +205,7 @@ export default async function lessonRoutes(fastify) {
     if (lessonError || !lesson) return reply.code(404).send({ error: 'Lesson not found' });
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
+    // Words sorted by sort_order ascending
     const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
@@ -193,18 +216,18 @@ export default async function lessonRoutes(fastify) {
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // KEY FIX: pick the session words first (same 10 the user saw in learn phase).
-    // ALL questions AND ALL distractor options come ONLY from these 10 words.
-    // This means the user is never tested on or shown words they haven't seen yet.
+    // Script lessons: pick first 10 in sort_order (same as learn phase)
+    // Other lessons: shuffle, pick 10
     const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
     const sessionWords = isScriptLesson
-      ? [...allWords].sort((a, b) => (a.sort_order ?? 9999) - (b.sort_order ?? 9999)).slice(0, 10)
+      ? allWords.slice(0, 10)  // already sorted from DB
       : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
 
-    // Shuffle the session words so question order differs from learn order
+    // Shuffle for quiz question order (different from learn card order)
     const words = [...sessionWords].sort(() => Math.random() - 0.5);
 
-    const direction = lesson.direction || 'te-en';
+    // Use request direction for language pair
+    const direction = resolveDirection(lesson.direction, requestDirection);
     const [sourceLang, targetLang] = direction.split('-');
 
     const questions = words.map((word, index) => {
@@ -212,8 +235,7 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      // ONLY use other words from the same 10-word session as distractors.
-      // Never pull from allWords (full lesson) — that would show unseen words.
+      // Distractors only from the same 10 session words
       const distractorPool = sessionWords.filter(w => w.id !== word.id);
 
       let options;
@@ -236,7 +258,6 @@ export default async function lessonRoutes(fastify) {
             return { id: w.id + '_wrong', text: ld.text, correct: false };
           });
 
-          // Pad only if session has fewer than 4 words (very small lessons)
           while (wrongOptions.length < 3) {
             wrongOptions.push({ id: `pad_${wrongOptions.length}`, text: '—', correct: false });
           }
@@ -284,7 +305,7 @@ export default async function lessonRoutes(fastify) {
     const { data: lessonRows, error: lessonError } = await supabase
       .from('lessons')
       .select('id')
-      .eq('direction', direction)
+      .or(`direction.eq.${direction},direction.eq.both`)
       .gte('module_order', 1)
       .lte('module_order', 18);
 
@@ -311,7 +332,6 @@ export default async function lessonRoutes(fastify) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
     }
 
-    // Final exam: pick 15 words — distractors from the same 15
     const examWords = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
     const [sourceLang, targetLang] = direction.split('-');
 
@@ -320,7 +340,6 @@ export default async function lessonRoutes(fastify) {
       const question    = resolveText(rawQuestion, sourceLang, word);
       const type        = getQuizType(index, isPremium);
 
-      // Distractors only from the 15 exam words — same principle
       const distractorPool = examWords.filter(w => w.id !== word.id);
 
       let options;
