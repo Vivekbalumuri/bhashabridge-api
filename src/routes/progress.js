@@ -69,7 +69,7 @@ export default async function progressRoutes(fastify) {
     const { data: lessons, error: lessonsError } = await supabase
       .from('lessons')
       .select('id, title, module_order, is_premium, skill_type, word_count, tier')
-      .eq('direction', direction)
+      .or(`direction.eq.${direction},direction.eq.both`)
       .order('module_order', { ascending: true });
 
     if (lessonsError) return reply.code(400).send({ error: lessonsError.message });
@@ -214,7 +214,7 @@ export default async function progressRoutes(fastify) {
     const { data: allLessons } = await supabase
       .from('lessons')
       .select('id, module_order')
-      .eq('direction', direction)
+      .or(`direction.eq.${direction},direction.eq.both`)
       .order('module_order', { ascending: true });
 
     let next_lesson_unlocked = false;
