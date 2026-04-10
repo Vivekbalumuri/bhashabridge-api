@@ -77,9 +77,6 @@ async function getUserIsPremium(supabaseUid) {
   }
 }
 
-// Resolve the effective direction for learn/quiz:
-// If lesson.direction is 'both', use the direction param from the request.
-// Otherwise use the lesson's own direction.
 function resolveDirection(lessonDirection, requestDirection) {
   if (!lessonDirection || lessonDirection === 'both') {
     return requestDirection || 'en-te';
@@ -91,12 +88,13 @@ export default async function lessonRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate);
 
   // ── GET /lessons?direction= ───────────────────────────────────────────────
+  // Always ordered by module_order ASC
   fastify.get('/', async (request, reply) => {
     const { direction } = request.query;
     let query = supabase
       .from('lessons')
       .select('id, title, description, direction, module_order, order_index, is_premium, skill_type, word_count, tier, xp_reward')
-      .order('module_order', { ascending: true });
+      .order('module_order', { ascending: true });  // ← guaranteed module_order sort
 
     if (direction) {
       query = query.or(`direction.eq.${direction},direction.eq.both`);
@@ -108,9 +106,9 @@ export default async function lessonRoutes(fastify) {
   });
 
   // ── GET /lessons/:id/learn ────────────────────────────────────────────────
+  // Words always fetched in sort_order ASC from DB — no re-sorting or shuffling
   fastify.get('/:id/learn', async (request, reply) => {
     const { id } = request.params;
-    // direction param tells us which language pair the user is studying
     const requestDirection = request.query.direction || 'en-te';
 
     const [lessonResult, isPremium] = await Promise.all([
@@ -121,25 +119,21 @@ export default async function lessonRoutes(fastify) {
     if (lessonError || !lesson) return reply.code(404).send({ error: 'Lesson not found' });
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
-    // Words sorted by sort_order ascending — always in the correct sequence
+    // Words always fetched in sort_order ASC — this is the single source of truth
     const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
       .eq('lesson_id', id)
-      .order('sort_order', { ascending: true });
+      .order('sort_order', { ascending: true });  // ← guaranteed sort_order
+
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Script lessons (1-18): always take words in sort_order — no shuffle
-    // Other lessons: shuffle for variety, take 10
-    const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
-    const words = isScriptLesson
-      ? allWords.slice(0, 10)  // already sorted by sort_order from DB query
-      : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
+    // Always take first 10 in sort_order — no shuffling in learn phase
+    const words = allWords.slice(0, 10);
 
-    // Use request direction (user's chosen language pair) not lesson.direction
     const direction = resolveDirection(lesson.direction, requestDirection);
     const [sourceLang, targetLang] = direction.split('-');
     const alsoLang = getAlsoLang(sourceLang, targetLang);
@@ -193,6 +187,7 @@ export default async function lessonRoutes(fastify) {
   });
 
   // ── GET /lessons/:id/quiz ─────────────────────────────────────────────────
+  // Words fetched in sort_order ASC, quiz questions shuffled for variety
   fastify.get('/:id/quiz', async (request, reply) => {
     const { id } = request.params;
     const requestDirection = request.query.direction || 'en-te';
@@ -205,28 +200,24 @@ export default async function lessonRoutes(fastify) {
     if (lessonError || !lesson) return reply.code(404).send({ error: 'Lesson not found' });
     if (lesson.is_premium && !isPremium) return reply.code(403).send({ error: 'Premium lesson' });
 
-    // Words sorted by sort_order ascending
+    // Words fetched in sort_order ASC
     const { data: rawWords, error: wordsError } = await supabase
       .from('words')
       .select('*')
       .eq('lesson_id', id)
-      .order('sort_order', { ascending: true });
+      .order('sort_order', { ascending: true });  // ← guaranteed sort_order
+
     if (wordsError) return reply.code(400).send({ error: wordsError.message });
 
     const allWords = dedupById(rawWords || []);
     if (allWords.length === 0) return reply.code(404).send({ error: 'No words found for this lesson' });
 
-    // Script lessons: pick first 10 in sort_order (same as learn phase)
-    // Other lessons: shuffle, pick 10
-    const isScriptLesson = lesson.module_order >= 1 && lesson.module_order <= 18;
-    const sessionWords = isScriptLesson
-      ? allWords.slice(0, 10)  // already sorted from DB
-      : [...allWords].sort(() => Math.random() - 0.5).slice(0, 10);
+    // Session = first 10 in sort_order (consistent with learn phase)
+    const sessionWords = allWords.slice(0, 10);
 
-    // Shuffle for quiz question order (different from learn card order)
+    // Shuffle question ORDER only — the word pool itself stays the same 10
     const words = [...sessionWords].sort(() => Math.random() - 0.5);
 
-    // Use request direction for language pair
     const direction = resolveDirection(lesson.direction, requestDirection);
     const [sourceLang, targetLang] = direction.split('-');
 
@@ -307,7 +298,8 @@ export default async function lessonRoutes(fastify) {
       .select('id')
       .or(`direction.eq.${direction},direction.eq.both`)
       .gte('module_order', 1)
-      .lte('module_order', 18);
+      .lte('module_order', 18)
+      .order('module_order', { ascending: true });  // ← module_order for lesson selection
 
     if (lessonError) return reply.code(400).send({ error: lessonError.message });
     if (!lessonRows?.length) {
@@ -316,6 +308,7 @@ export default async function lessonRoutes(fastify) {
 
     const lessonIds = lessonRows.map(l => l.id);
 
+    // Words fetched in sort_order ASC across all alphabet lessons
     const { data: rawWords, error } = await supabase
       .from('words')
       .select(`
@@ -323,7 +316,8 @@ export default async function lessonRoutes(fastify) {
         translit_telugu, translit_tamil, translit_malayalam, translit_kannada,
         dravidian_note, sort_order
       `)
-      .in('lesson_id', lessonIds);
+      .in('lesson_id', lessonIds)
+      .order('sort_order', { ascending: true });  // ← sort_order within lessons
 
     if (error) return reply.code(400).send({ error: error.message });
 
@@ -332,6 +326,7 @@ export default async function lessonRoutes(fastify) {
       return reply.code(404).send({ error: 'No alphabet words found for this direction' });
     }
 
+    // Final exam shuffles word selection (different every attempt)
     const examWords = [...allWords].sort(() => Math.random() - 0.5).slice(0, 15);
     const [sourceLang, targetLang] = direction.split('-');
 

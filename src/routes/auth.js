@@ -1,16 +1,16 @@
 import { supabase } from '../db.js';
 
 // ── Supabase admin client — needed for resend verification ────────────────────
-// Uses SUPABASE_SERVICE_KEY (set this on Render dashboard).
+// Uses SUPABASE_SERVICE_ROLE_KEY (set this on Render dashboard).
 import { createClient } from '@supabase/supabase-js';
 
-if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-  console.warn("⚠️  WARNING: SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in your .env file.");
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("⚠️  WARNING: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in your .env file.");
 }
 
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
-  process.env.SUPABASE_SERVICE_KEY || 'placeholder-key'
+  process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder-key'
 );
 
 // Deep-link base that Supabase will append the verification token to.
@@ -45,7 +45,6 @@ export default async function authRoutes(fastify) {
         email,
         display_name:   displayName,
         native_lang:    nativeLang,
-        learning_langs: learningLangs,
         // FIX: store initial verification state from Supabase
         is_email_verified: authData.user.email_confirmed_at != null,
       })
@@ -57,7 +56,7 @@ export default async function authRoutes(fastify) {
     const { error: streakError } = await supabase
       .from('streaks')
       .upsert(
-        { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity_date: null },
+        { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity: null },
         { onConflict: 'user_id' }
       );
 
@@ -98,7 +97,7 @@ export default async function authRoutes(fastify) {
       await supabase
         .from('streaks')
         .upsert(
-          { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity_date: null },
+          { user_id: profile.id, current_streak: 0, longest_streak: 0, total_xp: 0, level: 1, last_activity: null },
           { onConflict: 'user_id' }
         );
     }
@@ -225,7 +224,7 @@ export default async function authRoutes(fastify) {
       .from('streaks')
       .upsert(
         { user_id: profile.id, current_streak: 0, longest_streak: 0,
-          total_xp: 0, level: 1, last_activity_date: null },
+          total_xp: 0, level: 1, last_activity: null },
         { onConflict: 'user_id' }
       );
 

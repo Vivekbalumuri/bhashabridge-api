@@ -7,6 +7,7 @@ import lessonRoutes   from './routes/lessons.js';
 import wordRoutes     from './routes/words.js';
 import progressRoutes from './routes/progress.js';
 import streakRoutes   from './routes/streak.js';
+import purchaseRoutes from './routes/purchase.js';
 import { registerJobs } from './jobs/index.js';
 
 const fastify = Fastify({ logger: true });
@@ -24,9 +25,6 @@ await fastify.register(rateLimit, {
 });
 
 // ── Auth decorator ────────────────────────────────────────
-// Uses supabase.auth.getUser() to verify the Supabase ES256 JWT.
-// Replaces @fastify/jwt which only supports HS256 and rejects all
-// valid Supabase tokens with "Invalid token".
 fastify.decorate('authenticate', async function (request, reply) {
   const authHeader = request.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -41,7 +39,6 @@ fastify.decorate('authenticate', async function (request, reply) {
     return reply.code(401).send({ error: 'Unauthorized: Invalid token' });
   }
 
-  // Make user available in all route handlers as request.user
   request.user = user;
 });
 
@@ -54,10 +51,10 @@ fastify.register(lessonRoutes,   { prefix: '/lessons' });
 fastify.register(wordRoutes,     { prefix: '/words' });
 fastify.register(progressRoutes, { prefix: '/progress' });
 fastify.register(streakRoutes,   { prefix: '/streak' });
-fastify.register(import('./routes/leaderboard.js'))
-fastify.register(import('./routes/notify.js'))
-fastify.register(import('./routes/referral.js'), { prefix: '/referral' })
-
+fastify.register(purchaseRoutes, { prefix: '/purchase' });
+fastify.register(import('./routes/leaderboard.js'));
+fastify.register(import('./routes/notify.js'));
+fastify.register(import('./routes/referral.js'), { prefix: '/referral' });
 
 // ── Start ─────────────────────────────────────────────────
 try {
@@ -65,7 +62,6 @@ try {
     port: process.env.PORT || 3000,
     host: '0.0.0.0'
   });
-  // Start background jobs after server is up
   registerJobs(fastify);
 } catch (err) {
   fastify.log.error(err);

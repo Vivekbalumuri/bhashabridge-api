@@ -4,93 +4,86 @@
  * GET  /streak           — current streak + XP + level
  * GET  /streak/history   — last 30 days of activity
  * POST /streak/add-xp    — awards XP, updates streak, bumps weekly_xp
- *
- * FIX: getUserId now checks BOTH request.user.id AND request.user.sub
- * because Supabase JWTs put the uid in "sub", but some middleware copies
- * it to "id". Using only one caused GET /streak to always return 404.
  */
 
-const XP_PER_LEVEL = 500
+const XP_PER_LEVEL = 500;
 
 function xpToLevel(xp) {
-  return Math.floor(xp / XP_PER_LEVEL) + 1
+  return Math.floor(xp / XP_PER_LEVEL) + 1;
 }
 
 function xpToLeague(xp) {
-  if (xp >= 10_000) return 'diamond'
-  if (xp >=  3_000) return 'gold'
-  if (xp >=  1_000) return 'silver'
-  return 'bronze'
+  if (xp >= 10_000) return 'diamond';
+  if (xp >=  3_000) return 'gold';
+  if (xp >=  1_000) return 'silver';
+  return 'bronze';
 }
 
 async function streakRoutes(fastify, _opts) {
-  const db = fastify.supabase
+  const db = fastify.supabase;
 
-  // FIX: accept either .sub (Supabase JWT standard) or .id (set by some middleware)
   function getSupabaseUid(request) {
-    return request.user?.sub ?? request.user?.id ?? null
+    return request.user?.sub ?? request.user?.id ?? null;
   }
 
   async function getUserId(supabaseUid) {
-    if (!supabaseUid) return null
+    if (!supabaseUid) return null;
     const { data, error } = await db
       .from('users')
       .select('id')
       .eq('supabase_uid', supabaseUid)
-      .single()
-    if (error || !data) return null
-    return data.id
+      .single();
+    if (error || !data) return null;
+    return data.id;
   }
 
   // ── GET /streak ───────────────────────────────────────────────────────────
-  fastify.get('/streak', { onRequest: [fastify.authenticate] }, async (request, reply) => {
-    const supabaseUid = getSupabaseUid(request)
-    const userId = await getUserId(supabaseUid)
+  // FIX: was '/streak' — with prefix '/streak' in server.js that made it '/streak/streak'
+  fastify.get('/', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const supabaseUid = getSupabaseUid(request);
+    const userId = await getUserId(supabaseUid);
 
-    // FIX: if user row not found, return empty streak instead of 404
-    // This prevents the Android app from getting an error on first login
-    // before the user row is fully created.
     if (!userId) {
-      fastify.log.warn(`GET /streak — user row not found for uid=${supabaseUid}`)
-      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 })
+      fastify.log.warn(`GET /streak — user row not found for uid=${supabaseUid}`);
+      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 });
     }
 
     const { data: streak, error } = await db
       .from('streaks')
       .select('current_streak, last_activity, total_xp, level')
       .eq('user_id', userId)
-      .single()
+      .single();
 
     if (error && error.code !== 'PGRST116') {
-      fastify.log.error({ error }, 'GET /streak error')
-      return reply.code(500).send({ error: 'Failed to load streak.' })
+      fastify.log.error({ error }, 'GET /streak error');
+      return reply.code(500).send({ error: 'Failed to load streak.' });
     }
 
     if (!streak) {
-      // No streak row yet — auto-create it so subsequent calls work
       await db.from('streaks').upsert(
         { user_id: userId, current_streak: 0, total_xp: 0, level: 1 },
         { onConflict: 'user_id' }
-      )
-      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 })
+      );
+      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 });
     }
 
     return reply.send({
       current_streak: streak.current_streak ?? 0,
       last_activity:  streak.last_activity  ?? null,
       total_xp:       streak.total_xp       ?? 0,
-      level:          streak.level          ?? xpToLevel(streak.total_xp ?? 0)
-    })
-  })
+      level:          streak.level          ?? xpToLevel(streak.total_xp ?? 0),
+    });
+  });
 
   // ── GET /streak/history ───────────────────────────────────────────────────
-  fastify.get('/streak/history', { onRequest: [fastify.authenticate] }, async (request, reply) => {
-    const supabaseUid = getSupabaseUid(request)
-    const userId = await getUserId(supabaseUid)
-    if (!userId) return reply.send({ history: [] })
+  // FIX: was '/streak/history' — now '/history' (prefix handles /streak)
+  fastify.get('/history', { onRequest: [fastify.authenticate] }, async (request, reply) => {
+    const supabaseUid = getSupabaseUid(request);
+    const userId = await getUserId(supabaseUid);
+    if (!userId) return reply.send({ history: [] });
 
-    const cutoff = new Date()
-    cutoff.setDate(cutoff.getDate() - 30)
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
 
     const { data: rows, error } = await db
       .from('lesson_progress')
@@ -98,30 +91,31 @@ async function streakRoutes(fastify, _opts) {
       .eq('user_id', userId)
       .eq('quiz_completed', true)
       .gte('completed_at', cutoff.toISOString())
-      .order('completed_at', { ascending: true })
+      .order('completed_at', { ascending: true });
 
     if (error) {
-      fastify.log.error({ error }, 'GET /streak/history error')
-      return reply.code(500).send({ error: 'Failed to load streak history.' })
+      fastify.log.error({ error }, 'GET /streak/history error');
+      return reply.code(500).send({ error: 'Failed to load streak history.' });
     }
 
-    const byDate = {}
+    const byDate = {};
     for (const row of rows ?? []) {
-      if (!row.completed_at) continue
-      const date = row.completed_at.slice(0, 10)
-      const xp   = row.lessons?.xp_reward ?? 20
-      if (!byDate[date]) byDate[date] = { date, xp: 0, lessons_completed: 0 }
-      byDate[date].xp               += xp
-      byDate[date].lessons_completed += 1
+      if (!row.completed_at) continue;
+      const date = row.completed_at.slice(0, 10);
+      const xp   = row.lessons?.xp_reward ?? 20;
+      if (!byDate[date]) byDate[date] = { date, xp: 0, lessons_completed: 0 };
+      byDate[date].xp               += xp;
+      byDate[date].lessons_completed += 1;
     }
 
-    const history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date))
-    return reply.send({ history })
-  })
+    const history = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+    return reply.send({ history });
+  });
 
   // ── POST /streak/add-xp ───────────────────────────────────────────────────
+  // FIX: was '/streak/add-xp' — now '/add-xp' (prefix handles /streak)
   fastify.post(
-    '/streak/add-xp',
+    '/add-xp',
     {
       onRequest: [fastify.authenticate],
       schema: {
@@ -131,70 +125,69 @@ async function streakRoutes(fastify, _opts) {
           properties: {
             chapter_id: { type: 'integer' },
             direction:  { type: 'string'  },
-            xp_earned:  { type: 'integer', minimum: 0, maximum: 500 }
-          }
-        }
-      }
+            xp_earned:  { type: 'integer', minimum: 0, maximum: 500 },
+          },
+        },
+      },
     },
     async (request, reply) => {
-      const { xp_earned } = request.body
-      const supabaseUid = getSupabaseUid(request)
-      const userId = await getUserId(supabaseUid)
-      if (!userId) return reply.code(404).send({ error: 'User not found.' })
+      const { xp_earned } = request.body;
+      const supabaseUid = getSupabaseUid(request);
+      const userId = await getUserId(supabaseUid);
+      if (!userId) return reply.code(404).send({ error: 'User not found.' });
 
       const { data: current, error: fetchErr } = await db
         .from('streaks')
         .select('current_streak, last_activity, total_xp')
         .eq('user_id', userId)
-        .single()
+        .single();
 
       if (fetchErr && fetchErr.code !== 'PGRST116') {
-        return reply.code(500).send({ error: 'Failed to read streak.' })
+        return reply.code(500).send({ error: 'Failed to read streak.' });
       }
 
-      const todayStr   = new Date().toISOString().slice(0, 10)
-      const lastStr    = current?.last_activity ?? ''
-      const prevStreak = current?.current_streak ?? 0
-      const prevXp     = current?.total_xp ?? 0
+      const todayStr   = new Date().toISOString().slice(0, 10);
+      const lastStr    = current?.last_activity ?? '';
+      const prevStreak = current?.current_streak ?? 0;
+      const prevXp     = current?.total_xp ?? 0;
 
-      let newStreak = prevStreak
+      let newStreak = prevStreak;
       if (lastStr !== todayStr) {
-        const yesterday = new Date()
-        yesterday.setDate(yesterday.getDate() - 1)
-        const yesterdayStr = yesterday.toISOString().slice(0, 10)
-        newStreak = (lastStr === yesterdayStr) ? prevStreak + 1 : 1
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toISOString().slice(0, 10);
+        newStreak = (lastStr === yesterdayStr) ? prevStreak + 1 : 1;
       }
 
-      const newXp    = prevXp + xp_earned
-      const newLevel = xpToLevel(newXp)
+      const newXp    = prevXp + xp_earned;
+      const newLevel = xpToLevel(newXp);
 
       const { error: upsertErr } = await db
         .from('streaks')
         .upsert(
           { user_id: userId, current_streak: newStreak, last_activity: todayStr, total_xp: newXp, level: newLevel },
           { onConflict: 'user_id' }
-        )
+        );
 
       if (upsertErr) {
-        fastify.log.error({ upsertErr }, 'POST /streak/add-xp upsert error')
-        return reply.code(500).send({ error: 'Failed to update streak.' })
+        fastify.log.error({ upsertErr }, 'POST /streak/add-xp upsert error');
+        return reply.code(500).send({ error: 'Failed to update streak.' });
       }
 
-      // Bump weekly_xp — best effort, non-blocking
-      const league = xpToLeague(newXp)
+      const league = xpToLeague(newXp);
       db.rpc('increment_weekly_xp', { p_user_id: userId, p_xp: xp_earned })
         .then(({ error }) => {
           if (error) {
             return db
               .from('user_leagues')
-              .upsert({ user_id: userId, league, weekly_xp: xp_earned }, { onConflict: 'user_id', ignoreDuplicates: false })
+              .upsert({ user_id: userId, league, weekly_xp: xp_earned }, { onConflict: 'user_id', ignoreDuplicates: false });
           }
         })
-        .catch(err => fastify.log.warn({ err }, 'weekly_xp bump failed (non-critical)'))
+        .catch(err => fastify.log.warn({ err }, 'weekly_xp bump failed (non-critical)'));
 
-      return reply.send({ current_streak: newStreak, total_xp: newXp, level: newLevel })
+      return reply.send({ current_streak: newStreak, total_xp: newXp, level: newLevel });
     }
-  )
+  );
 }
 
-export default streakRoutes
+export default streakRoutes;
