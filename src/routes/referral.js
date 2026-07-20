@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { sendReferralRewardEmail } from '../services/emailService.js';
 
 const REFERRER_REWARD_DAYS = 7;
 const REFERRED_REWARD_DAYS = 3;
@@ -110,7 +111,7 @@ export default async function referralRoutes(fastify) {
     // Find referrer
     const { data: referrer } = await supabase
       .from('users')
-      .select('id, display_name')
+      .select('id, display_name, email')
       .eq('referral_code', code)
       .single();
 
@@ -140,6 +141,13 @@ export default async function referralRoutes(fastify) {
       .from('users')
       .update({ referral_count: (await supabase.from('users').select('referral_count').eq('id', referrer.id).single()).data?.referral_count + 1 || 1 })
       .eq('id', referrer.id);
+
+    // Send referral reward email to the referrer in background
+    if (referrer.email) {
+      sendReferralRewardEmail(referrer.email, REFERRER_REWARD_DAYS).catch(err => {
+        fastify.log.error({ err }, `Failed to send referral reward email to ${referrer.email}`);
+      });
+    }
 
     return {
       success:              true,

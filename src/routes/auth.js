@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { sendWelcomeEmail, sendPasswordResetEmail } from '../services/emailService.js';
 
 // ── Supabase admin client — needed for resend verification ────────────────────
 // Uses SUPABASE_SERVICE_ROLE_KEY (set this on Render dashboard).
@@ -63,6 +64,11 @@ export default async function authRoutes(fastify) {
     if (streakError) {
       fastify.log.warn(`Streak row creation failed for user ${profile.id}: ${streakError.message}`);
     }
+
+    // Send welcome email in background
+    sendWelcomeEmail(email, displayName).catch(err => {
+      fastify.log.error({ err }, `Failed to send welcome email to ${email}`);
+    });
 
     return reply.code(201).send({
       token:         authData.session?.access_token  || null,
@@ -148,11 +154,29 @@ export default async function authRoutes(fastify) {
     const { email } = request.body;
     if (!email) return reply.code(400).send({ error: 'Email is required' });
 
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: 'bhashabridge://reset-password'
+    const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'recovery',
+      email,
+      options: {
+        redirectTo: 'bhashabridge://reset-password'
+      }
     });
 
-    if (error) fastify.log.warn(`Password reset for ${email}: ${error.message}`);
+    if (error) {
+      fastify.log.warn(`Password reset generation failed for ${email}: ${error.message}`);
+      // Return 200 to prevent user enumeration
+      return reply.code(200).send({
+        message: 'If an account exists with this email, a reset link has been sent.'
+      });
+    }
+
+    const resetLink = data?.properties?.action_link;
+    if (resetLink) {
+      // Send the custom email in the background
+      sendPasswordResetEmail(email, resetLink).catch(err => {
+        fastify.log.error({ err }, `Failed to send password reset email to ${email}`);
+      });
+    }
 
     return reply.code(200).send({
       message: 'If an account exists with this email, a reset link has been sent.'
@@ -204,6 +228,15 @@ export default async function authRoutes(fastify) {
 
     const supabaseUid = authData.user.id;
 
+    // Check if user is a new signup
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('supabase_uid', supabaseUid)
+      .single();
+
+    const isNewUser = !existingUser;
+
     const { data: profile, error: upsertError } = await supabase
       .from('users')
       .upsert({
@@ -219,6 +252,12 @@ export default async function authRoutes(fastify) {
       .single();
 
     if (upsertError) return reply.code(400).send({ error: upsertError.message });
+
+    if (isNewUser) {
+      sendWelcomeEmail(profile.email, profile.display_name).catch(err => {
+        fastify.log.error({ err }, `Failed to send welcome email to ${profile.email}`);
+      });
+    }
 
     await supabase
       .from('streaks')

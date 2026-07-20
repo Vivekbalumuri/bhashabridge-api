@@ -13,6 +13,7 @@
  */
 
 import cron from 'node-cron'
+import admin from 'firebase-admin'
 import { scheduleLeagueReset } from './leagueReset.js'
 
 export function registerJobs(fastify) {
@@ -56,6 +57,62 @@ export function registerJobs(fastify) {
       fastify.log.error({ err }, 'streak-lost job failed')
     }
   }, { timezone: 'UTC' })
+
+  // ── Daily reminder 8:00 PM (20:00) Server Time ──────────────────────────────
+  cron.schedule('0 20 * * *', async () => {
+    fastify.log.info('Running daily reminder cron job (8:00 PM)...');
+
+    // Ensure Firebase Admin is initialized
+    if (admin.apps.length === 0) {
+      try {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId:   process.env.FCM_PROJECT_ID,
+            clientEmail: process.env.FCM_CLIENT_EMAIL,
+            privateKey:  process.env.FCM_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+          }),
+        });
+      } catch (err) {
+        fastify.log.error(err, 'Failed to initialize Firebase Admin in cron job');
+        return;
+      }
+    }
+
+    // Logic: Fetch all users with non-null fcm_token from Supabase
+    const { data: users, error } = await fastify.supabase
+      .from('users')
+      .select('fcm_token')
+      .not('fcm_token', 'is', null);
+
+    if (error) {
+      fastify.log.error(error, 'Failed to fetch FCM tokens for 8:00 PM cron job');
+      return;
+    }
+
+    const tokens = users.map(u => u.fcm_token).filter(Boolean);
+
+    if (tokens.length > 0) {
+      const message = {
+        notification: {
+          title: 'BhashaBridge 🎯',
+          body: "Don't lose your streak! Spend 5 minutes practicing today."
+        },
+        data: {
+          screen: 'home'
+        },
+        tokens: tokens
+      };
+
+      try {
+        const response = typeof admin.messaging().sendEachForMulticast === 'function'
+          ? await admin.messaging().sendEachForMulticast(message)
+          : await admin.messaging().sendMulticast(message);
+        fastify.log.info(`Sent notifications: ${response.successCount}`);
+      } catch (err) {
+        fastify.log.error(err, 'Error sending multicast message');
+      }
+    }
+  });
 
   // ── Weekly league reset — Monday 00:00 IST (Sunday 18:30 UTC) ────────────
   scheduleLeagueReset(fastify)
