@@ -385,9 +385,21 @@ export default async function authRoutes(fastify) {
   fastify.delete('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
     const uid = request.user.id;
 
+    // Delete Auth User
     const { error: authError } = await supabase.auth.admin.deleteUser(uid);
     if (authError) return reply.code(400).send({ error: authError.message });
 
+    // Clean up lesson progress manually since it uses supabase_uid directly and lacks database-level cascading
+    const { error: lpError } = await supabase
+      .from('lesson_progress')
+      .delete()
+      .eq('user_id', uid);
+
+    if (lpError) {
+      fastify.log.error({ lpError }, `Failed to clean up lesson progress for user ${uid}`);
+    }
+
+    // Delete User Profile (will trigger CASCADE delete on streaks, user_leagues, purchases, referrals)
     const { error: dbError } = await supabase
       .from('users')
       .delete()
