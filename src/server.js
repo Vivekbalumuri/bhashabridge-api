@@ -55,6 +55,9 @@ fastify.register(purchaseRoutes, { prefix: '/purchase' });
 fastify.register(import('./routes/leaderboard.js'));
 fastify.register(import('./routes/notify.js'));
 fastify.register(import('./routes/referral.js'), { prefix: '/referral' });
+fastify.register(import('./routes/stories.js'),  { prefix: '/stories' });
+fastify.register(import('./routes/config.js'),   { prefix: '/config' });
+fastify.register(import('./routes/legal.js'),    { prefix: '/legal' });
 
 // ── Start ─────────────────────────────────────────────────
 try {

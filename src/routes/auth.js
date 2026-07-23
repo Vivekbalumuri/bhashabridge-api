@@ -24,7 +24,7 @@ export default async function authRoutes(fastify) {
   // FIX (Issue 3): added emailRedirectTo so Supabase sends a real verification
   // email with a deep-link back into the app instead of a generic web URL.
   fastify.post('/register', async (request, reply) => {
-    const { email, password, nativeLang, learningLangs, displayName } = request.body;
+    const { email, password, nativeLang, learningLangs, displayName, learning_reason, learningReason, terms_accepted_at, termsAcceptedAt } = request.body;
 
     const { data: authData, error: signUpError } = await supabase.auth.signUp({
       email,
@@ -48,6 +48,8 @@ export default async function authRoutes(fastify) {
         native_lang:    nativeLang,
         // FIX: store initial verification state from Supabase
         is_email_verified: authData.user.email_confirmed_at != null,
+        learning_reason: learning_reason !== undefined ? learning_reason : learningReason,
+        terms_accepted_at: terms_accepted_at !== undefined ? terms_accepted_at : termsAcceptedAt,
       })
       .select()
       .single();
@@ -318,22 +320,39 @@ export default async function authRoutes(fastify) {
       fastify.log.warn(`Could not fetch auth user for verification check: ${e.message}`);
     }
 
+    // Fetch user's streak details from database
+    const { data: streakRow } = await supabase
+      .from('streaks')
+      .select('current_streak, total_xp, level')
+      .eq('user_id', profile.id)
+      .single();
+
     return {
       ...profile,
       is_premium:          isPremium,
       premium_expires_at:  profile.premium_expires_at ?? null,
       is_email_verified:   isEmailVerified,
+      streak_freezes:      profile.streak_freezes ?? 0,
+      current_streak:      streakRow?.current_streak ?? 0,
+      total_xp:            streakRow?.total_xp ?? 0,
+      level:               streakRow?.level ?? 1,
     };
   });
 
   // ── PATCH /me ──────────────────────────────────────────────────────────────
   fastify.patch('/me', { preHandler: [fastify.authenticate] }, async (request, reply) => {
-    const { displayName, dailyGoalMin, fcmToken } = request.body;
+    const { displayName, dailyGoalMin, fcmToken, learningReason, learning_reason, termsAcceptedAt, terms_accepted_at } = request.body;
 
     const updateData = {};
     if (displayName  !== undefined) updateData.display_name   = displayName;
     if (dailyGoalMin !== undefined) updateData.daily_goal_min = dailyGoalMin;
     if (fcmToken     !== undefined) updateData.fcm_token      = fcmToken;
+
+    const finalReason = learning_reason !== undefined ? learning_reason : learningReason;
+    if (finalReason !== undefined) updateData.learning_reason = finalReason;
+
+    const finalTerms = terms_accepted_at !== undefined ? terms_accepted_at : termsAcceptedAt;
+    if (finalTerms !== undefined) updateData.terms_accepted_at = finalTerms;
 
     const { data: profile, error } = await supabase
       .from('users')

@@ -45,7 +45,7 @@ async function streakRoutes(fastify, _opts) {
 
     if (!userId) {
       fastify.log.warn(`GET /streak — user row not found for uid=${supabaseUid}`);
-      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 });
+      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1, streak_freezes: 0 });
     }
 
     const { data: streak, error } = await db
@@ -59,12 +59,18 @@ async function streakRoutes(fastify, _opts) {
       return reply.code(500).send({ error: 'Failed to load streak.' });
     }
 
+    const { data: userProfile } = await db
+      .from('users')
+      .select('streak_freezes')
+      .eq('id', userId)
+      .single();
+
     if (!streak) {
       await db.from('streaks').upsert(
         { user_id: userId, current_streak: 0, total_xp: 0, level: 1 },
         { onConflict: 'user_id' }
       );
-      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1 });
+      return reply.send({ current_streak: 0, last_activity: null, total_xp: 0, level: 1, streak_freezes: userProfile?.streak_freezes ?? 0 });
     }
 
     return reply.send({
@@ -72,6 +78,7 @@ async function streakRoutes(fastify, _opts) {
       last_activity:  streak.last_activity  ?? null,
       total_xp:       streak.total_xp       ?? 0,
       level:          streak.level          ?? xpToLevel(streak.total_xp ?? 0),
+      streak_freezes: userProfile?.streak_freezes ?? 0
     });
   });
 
@@ -162,7 +169,7 @@ async function streakRoutes(fastify, _opts) {
       const newXp    = prevXp + xp_earned;
       const newLevel = xpToLevel(newXp);
 
-      const { error: upsertErr } = await db
+       const { error: upsertErr } = await db
         .from('streaks')
         .upsert(
           { user_id: userId, current_streak: newStreak, last_activity: todayStr, total_xp: newXp, level: newLevel },
@@ -172,6 +179,26 @@ async function streakRoutes(fastify, _opts) {
       if (upsertErr) {
         fastify.log.error({ upsertErr }, 'POST /streak/add-xp upsert error');
         return reply.code(500).send({ error: 'Failed to update streak.' });
+      }
+
+      // Check 5-day milestone: grant freeze (+1) capped based on premium status
+      const { data: userProfile } = await db
+        .from('users')
+        .select('is_premium, streak_freezes')
+        .eq('id', userId)
+        .single();
+
+      let freezes = userProfile?.streak_freezes ?? 0;
+      const hitMilestone = (newStreak > prevStreak) && (newStreak % 5 === 0);
+      if (hitMilestone) {
+        const cap = userProfile?.is_premium ? 5 : 3;
+        if (freezes < cap) {
+          freezes = Math.min(freezes + 1, cap);
+          await db
+            .from('users')
+            .update({ streak_freezes: freezes })
+            .eq('id', userId);
+        }
       }
 
       const league = xpToLeague(newXp);
@@ -185,7 +212,64 @@ async function streakRoutes(fastify, _opts) {
         })
         .catch(err => fastify.log.warn({ err }, 'weekly_xp bump failed (non-critical)'));
 
-      return reply.send({ current_streak: newStreak, total_xp: newXp, level: newLevel });
+      return reply.send({ current_streak: newStreak, total_xp: newXp, level: newLevel, streak_freezes: freezes });
+    }
+  );
+  // ── POST /use-freeze ───────────────────────────────────────────────────────
+  fastify.post(
+    '/use-freeze',
+    {
+      onRequest: [fastify.authenticate]
+    },
+    async (request, reply) => {
+      const supabaseUid = getSupabaseUid(request);
+      const userId = await getUserId(supabaseUid);
+      if (!userId) return reply.code(404).send({ error: 'User not found.' });
+
+      // 1. Check user profile for freezes
+      const { data: userProfile, error: profileErr } = await db
+        .from('users')
+        .select('streak_freezes')
+        .eq('id', userId)
+        .single();
+
+      if (profileErr || !userProfile) {
+        return reply.code(400).send({ error: 'Failed to read user freezes.' });
+      }
+
+      const freezes = userProfile.streak_freezes ?? 0;
+      if (freezes <= 0) {
+        return reply.code(400).send({ error: 'No streak freezes available.' });
+      }
+
+      // 2. Decrement freezes
+      const newFreezes = freezes - 1;
+      const { error: updateProfileErr } = await db
+        .from('users')
+        .update({ streak_freezes: newFreezes })
+        .eq('id', userId);
+
+      if (updateProfileErr) {
+        fastify.log.error({ updateProfileErr }, 'POST /streak/use-freeze update profile error');
+        return reply.code(500).send({ error: 'Failed to use streak freeze.' });
+      }
+
+      // 3. Update last_activity to Yesterday (YYYY-MM-DD)
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().slice(0, 10);
+
+      const { error: updateStreakErr } = await db
+        .from('streaks')
+        .update({ last_activity: yesterdayStr })
+        .eq('user_id', userId);
+
+      if (updateStreakErr) {
+        fastify.log.error({ updateStreakErr }, 'POST /streak/use-freeze update streak error');
+        return reply.code(500).send({ error: 'Failed to update streak activity.' });
+      }
+
+      return reply.send({ success: true, streak_freezes: newFreezes });
     }
   );
 }
